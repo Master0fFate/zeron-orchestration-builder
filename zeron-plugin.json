@@ -1,0 +1,25 @@
+{
+  "id": "orchestrator-builder",
+  "name": "Orchestrator Builder",
+  "version": "0.6.0",
+  "description": "Build and run an agent team graph.",
+  "entry": "init.luau",
+  "icon": "icon.svg",
+  "permissions": ["pages.add", "models.read", "files", "messages.send", "messages.read", "sessions.read", "navigate", "tools"],
+  "tools": [
+    {
+      "name": "submit_report",
+      "description": "Submit the current orchestrator step report and optional review decision.",
+      "input": {
+        "type": "object",
+        "properties": {
+          "nonce": { "type": "string", "description": "Exact step reference from the task." },
+          "report": { "type": "string", "description": "Short human-readable report, at most 8192 bytes." },
+          "result": { "type": "string", "enum": ["pass", "fail"], "description": "Decision for a conditional review step only." }
+        },
+        "required": ["nonce", "report"],
+        "additionalProperties": false
+      }
+    }
+  ]
+}
