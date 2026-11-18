@@ -15,6 +15,7 @@
 !/graph.luau
 !/icon.svg
 !/init.luau
+!/presets.luau
 !/runner.luau
 !/zeron-plugin.json
 !/zeron.luau

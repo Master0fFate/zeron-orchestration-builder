@@ -1,8 +1,8 @@
 {
   "id": "orchestrator-builder",
   "name": "Orchestrator Builder",
-  "version": "0.8.0",
-  "description": "Build and run an agent team graph.",
+  "version": "0.9.0",
+  "description": "Build and run agent teams from reusable workflow presets.",
   "entry": "init.luau",
   "icon": "icon.svg",
   "permissions": ["pages.add", "models.read", "files", "messages.send", "messages.read", "sessions.read", "navigate", "tools", "ui.add", "files.read", "devices", "github", "compose", "commands"],

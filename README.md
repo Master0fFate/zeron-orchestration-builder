@@ -16,7 +16,7 @@ The plugin requires Zeron v3 and a configured agent. No changes to Zeron or sepa
 
 ## Use
 
-- New teams start with Chief → Planner → Worker → Validator → QA, with QA passing to Finish or returning to Validator on failure. Add Planner, Worker, Validator, Auditor, QA, Researcher or Finish blocks from the toolbar. Existing saved teams are not changed.
+- The first install opens a starter team. Choose **New team** to preview and create a workflow preset or start with **Blank**. Add or edit blocks from the toolbar. Creating a team does not change existing teams or start a run.
 - Drag a block to move it. Drag an output dot to another block's input dot to connect them. Select a line to edit its condition or remove it. Conditions are Always, Pass and Fail; a Fail return needs a retry limit from 1 to 10. The limit counts failure returns across the entire run. Save connection applies settings; Remove connection deletes it. Incomplete drafts can be saved and checked later.
 - Drag empty canvas space to pan, scroll to zoom at the pointer, and use Fit to frame the graph. The grid can be turned on or off from the toolbar.
 - Select a block's settings icon to edit its name, icon, runtime, provider, model and role instructions. Choose Other agent to enter a custom runtime ID. Save the block to apply the edits.
@@ -26,6 +26,19 @@ The plugin requires Zeron v3 and a configured agent. No changes to Zeron or sepa
 - Open Team for the name and checks. Checks flag missing inputs and outputs, invalid routes, unreachable blocks, missing role instructions, incomplete model choices, missing Finish blocks and unbounded cycles. A manually entered model ID is not checked against the catalog.
 
 New role blocks start with editable default instructions. Custom instructions replace the default; Restore default puts it back. They are task text, not a system prompt. Chief is an entry point, not an agent turn: its settings are not used for runs, and it is not linked to the active chat. The plugin does not intercept the main chat's messages.
+
+## Workflow presets
+
+| Preset | Use it to |
+| --- | --- |
+| Plan, build, review | Turn a brief into a plan, implement it, and get a separate review. |
+| Plan only | Get ordered steps and acceptance criteria without changing anything. |
+| Research & compare | Gather evidence, compare options, and make a recommendation. |
+| Review & revise | Draft, review, and send concrete issues back to the writer for up to two revisions. |
+| Review a change | Review a Git change by folder and prepare an unsent draft. Requires a change source and a checkout that can read its diff. |
+| Blank | Start with Chief and wire your own workflow. |
+
+Each preset is an editable copy with no model pinned. Pick a destination with a configured default agent or choose a runtime and model for each role. The four general presets do not need a Git change source.
 
 ## Reuse a saved team
 

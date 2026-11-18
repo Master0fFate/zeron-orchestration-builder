@@ -1,5 +1,6 @@
 local zeron = require("./zeron")("orchestrator-builder")
 local graph = require("./graph")
+local presets = require("./presets")
 local changes = require("./changes")
 local runner = require("./runner").create(zeron, graph)
 local Text = require("@ds/text")
@@ -38,6 +39,10 @@ local function agent_choice(id)
 	return if id == "" then "" else "__custom"
 end
 
+local preset_options = {}
+for _, preset in presets.list do table.insert(preset_options, { value = preset.id, label = preset.name }) end
+table.insert(preset_options, { value = "__blank", label = "Blank" })
+
 local commit_request = ui.state("orchestrator-builder.commit-request", nil)
 local add_options = { { value = "", label = "Add block" } }
 for _, option in graph.options do if option.value ~= "team" then table.insert(add_options, option) end end
@@ -63,6 +68,9 @@ local Builder = ui.component(function()
 	local selected_edge = ui.use_state(0)
 	local edit_open = ui.use_state(false)
 	local team_open = ui.use_state(false)
+	local preset_open = ui.use_state(false)
+	local preset_choice = ui.use_state(if #presets.list > 0 then presets.list[1].id else "__blank")
+	local preset_error = ui.use_state("")
 	local saved_team_open = ui.use_state(false)
 	local saved_team_choice = ui.use_state("")
 	local saved_team_kind = ui.use_state("team")
@@ -347,17 +355,52 @@ local Builder = ui.component(function()
 		ui.after(0, fit)
 	end
 
+	local function open_presets()
+		preset_error:set("")
+		if team_open:peek() then
+			team_open:set(false)
+			ui.after(0, function() preset_open:set(true) end)
+		else
+			preset_open:set(true)
+		end
+	end
+
+	local function selected_preset(id)
+		for _, preset in presets.list do if preset.id == id then return preset end end
+		return nil
+	end
+
 	local function new_team()
+		local choice = preset_choice:peek()
+		local preset = selected_preset(choice)
+		if choice ~= "__blank" and not preset then preset_error:set("Choose a preset"); return end
+		local value
+		if choice == "__blank" then
+			value = { version = 2, name = "Blank", next_id = 2, nodes = {
+				{ id = "1", kind = "chief", name = "Chief", x = 300, y = 48, instructions = "", harness = "", model = "" },
+			}, edges = {} }
+		else
+			value = presets.build(choice)
+			if not value then preset_error:set("This preset could not be created"); return end
+		end
 		local next_library = graph.copy(library:peek())
-		local id, value = tostring(next_library.next_id), graph.initial()
+		local base = if preset then preset.name else "Blank"
+		local name, suffix = base, 2
+		local function name_taken(candidate)
+			for _, entry in next_library.teams do if string.lower(entry.team.name) == string.lower(candidate) then return true end end
+			return false
+		end
+		while name_taken(name) do name = base .. " " .. suffix; suffix += 1 end
+		value.name = name
+		local id = tostring(next_library.next_id)
 		next_library.next_id += 1
 		next_library.active = id
 		table.insert(next_library.teams, { id = id, team = graph.copy(value) })
-		if not persist(next_library, value) then return end
+		if not persist(next_library, value) then preset_error:set("Could not save team; storage may be full"); return end
 		active_team:set(id)
 		team_name:set(value.name)
 		select_node("1")
-		team_open:set(false)
+		preset_open:set(false)
 		ui.after(0, fit)
 		notice:set("New team created")
 	end
@@ -857,6 +900,7 @@ local Builder = ui.component(function()
 				add_choice:set("")
 			end },
 			Button { "Team", tone = "secondary", size = "sm", on_click = function() team_open:set(true) end },
+			Button { "New team", tone = "secondary", size = "sm", on_click = open_presets },
 			Button { function() return if grid:get() then "Hide grid" else "Show grid" end, tone = "secondary", size = "sm", on_click = function()
 				local value = not grid:peek()
 				grid:set(value)
@@ -1055,6 +1099,18 @@ local Builder = ui.component(function()
 				}
 			end,
 		},
+		Dialog { open = preset_open, title = "New team", size = "md", cancel = "Cancel",
+			confirm = { label = "Create", on_click = new_team },
+			build = function()
+				return ui.column { w_full = true, gap = "$space.3",
+					Select { value = preset_choice, options = preset_options, label = "Workflow preset", w_full = true, on_change = function() preset_error:set("") end },
+					Text { function() local preset = selected_preset(preset_choice:get()); return if preset then preset.description else "Start with a Chief and build your own workflow." end, wrap = true },
+					Text { function() local preset = selected_preset(preset_choice:get()); return if preset then preset.flow else "Chief only · Draft; add blocks and connections before running." end, style = "caption", tone = "secondary", wrap = true },
+					Text { function() local preset = selected_preset(preset_choice:get()); return if preset then preset.detail or "" else "" end, style = "caption", tone = "secondary", wrap = true },
+					ui.show(function() return preset_error:get() ~= "" end, Text { function() return preset_error:get() end, style = "caption", tone = "danger", wrap = true }),
+				}
+			end,
+		},
 		Dialog { open = team_open, title = "Team", size = "md", cancel = "Close",
 			build = function()
 				return ui.scroll { w_full = true, h = 320,
@@ -1068,7 +1124,7 @@ local Builder = ui.component(function()
 								value.name = team_name:peek()
 								if save(value) then notice:set("Team name saved") end
 							end },
-							Button { "New team", tone = "secondary", size = "sm", on_click = new_team },
+							Button { "New team", tone = "secondary", size = "sm", on_click = open_presets },
 						},
 						ui.row { gap = "$space.2",
 							Button { "Import JSON", tone = "secondary", size = "sm", on_click = import_team },
