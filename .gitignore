@@ -10,6 +10,8 @@
 !/docs/
 /docs/*
 !/docs/screenshot.png
+!/docs/saved-team-showcase.mp4
+!/changes.luau
 !/graph.luau
 !/icon.svg
 !/init.luau

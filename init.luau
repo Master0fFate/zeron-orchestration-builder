@@ -1,5 +1,6 @@
 local zeron = require("./zeron")("orchestrator-builder")
 local graph = require("./graph")
+local changes = require("./changes")
 local runner = require("./runner").create(zeron, graph)
 local Text = require("@ds/text")
 local Button = require("@ds/button")
@@ -37,8 +38,15 @@ local function agent_choice(id)
 	return if id == "" then "" else "__custom"
 end
 
+local commit_request = ui.state("orchestrator-builder.commit-request", nil)
 local add_options = { { value = "", label = "Add block" } }
-for _, option in graph.options do table.insert(add_options, option) end
+for _, option in graph.options do if option.value ~= "team" then table.insert(add_options, option) end end
+table.insert(add_options, { value = "__saved_team", label = "Saved team" })
+zeron.menu { kind = "git.commit", id = "review-commit", label = "Review in Orchestrator Builder", run = function(context)
+	if type(context) ~= "table" or type(context.sha) ~= "string" or not string.find(context.sha, "%S") then zeron.toast("Commit SHA is unavailable"); return end
+	commit_request:set({ sha = context.sha, session = context.session })
+	zeron.toast("Open Orchestrator Builder to review this commit")
+end }
 
 local Builder = ui.component(function()
 	local previous = kept:peek() or graph.initial()
@@ -55,11 +63,26 @@ local Builder = ui.component(function()
 	local selected_edge = ui.use_state(0)
 	local edit_open = ui.use_state(false)
 	local team_open = ui.use_state(false)
+	local saved_team_open = ui.use_state(false)
+	local saved_team_choice = ui.use_state("")
+	local saved_team_kind = ui.use_state("team")
+	local saved_team_error = ui.use_state("")
+	local output_open = ui.use_state(false)
 	local run_open = ui.use_state(false)
 	local recovery_open = ui.use_state(false)
 	local recovery_id = nil
 	local task_text = ui.use_state("")
 	local destination_session = ui.use_state("")
+	local source_kind = ui.use_state("commit")
+	local source_ref = ui.use_state("")
+	local source_base = ui.use_state("")
+	local source_head = ui.use_state("")
+	local source_url = ui.use_state("")
+	local predicate = ui.use_state("docs")
+	local items = ui.use_state("")
+	local limit = ui.use_state("4")
+	local draft_open = ui.use_state(false)
+	local draft_used = ui.use_state(nil)
 	local selected_destination = nil
 	local run_error = ui.use_state("")
 	local edge_condition = ui.use_state("always")
@@ -158,7 +181,9 @@ local Builder = ui.component(function()
 			device = entry.device
 		end
 		if not device then return nil end
-		return { device = device, project = project }
+		local cwd = if type(session.cwd) == "string" and string.find(session.cwd, "%S") then session.cwd else nil
+		if not cwd and project and type(projects[project].path) == "string" and string.find(projects[project].path, "%S") then cwd = projects[project].path end
+		return { device = device, project = project, cwd = cwd }
 	end
 
 	local function destination_options()
@@ -181,12 +206,29 @@ local Builder = ui.component(function()
 		return options
 	end
 
+	ui.effect(function()
+		local request = commit_request:get()
+		if not request then return end
+		commit_request:set(nil)
+		source_kind:set("commit")
+		source_ref:set(request.sha)
+		run_error:set("")
+		local id = request.session or ""
+		local destination = if id ~= "" then destination_of(zeron.sessions()[id], zeron.projects()) else nil
+		destination_session:set(if destination then id else "")
+		selected_destination = destination
+		run_open:set(true)
+	end)
+
 	local function select_node(id)
 		local node = graph.node(team:peek(), id)
 		if not node then return end
 		selected:set(id)
 		selected_edge:set(0)
 		name:set(node.name or "")
+		predicate:set(node.predicate or "docs")
+		items:set(node.items or "")
+		limit:set(tostring(node.limit or 4))
 		instructions:set(node.instructions or "")
 		icon_svg:set(node.icon or "")
 		icon_name:set(node.icon_name or "")
@@ -230,6 +272,38 @@ local Builder = ui.component(function()
 			if save(value) then select_node(node.id) end
 		else
 			notice:set("A team can have up to 32 blocks")
+		end
+	end
+
+	local function saved_team_options()
+		local options = { { value = "", label = "Select a saved team" } }
+		local current = library:get()
+		for _, entry in current.teams do
+			if entry.id ~= current.active and entry.team.version == 2 then
+				table.insert(options, { value = entry.id, label = entry.team.name })
+			end
+		end
+		return options
+	end
+
+	local function add_saved_team()
+		local source
+		for _, entry in library:peek().teams do
+			if entry.id == saved_team_choice:peek() and entry.id ~= library:peek().active then source = entry.team; break end
+		end
+		if not source then saved_team_error:set("Select a saved team"); return end
+		local value = graph.copy(team:peek())
+		local index = #value.nodes
+		local node, err = graph.add_team(value, source, 100 + (index % 3) * 240, 120 + math.floor(index / 3) * 160, saved_team_kind:peek())
+		if not node then saved_team_error:set(err or "Could not add team"); return end
+		local ok, encoded = pcall(ui.json.encode, value)
+		if not ok or #encoded > 500000 then saved_team_error:set("Team exceeds the 500 KB portability limit"); return end
+		if save(value) then
+			select_node(node.id)
+			saved_team_open:set(false)
+			notice:set("Team block added")
+		else
+			saved_team_error:set("Not enough storage to add this team")
 		end
 	end
 
@@ -320,9 +394,12 @@ local Builder = ui.component(function()
 		transfer_status:set("")
 		local value = graph.copy(team:peek())
 		local filename = string.gsub(value.name, '[<>:"/\\|%?%*%c]', "_")
+		local encoded = ui.json.encode(value, { pretty = true })
+		if #encoded > 500000 then encoded = ui.json.encode(value) end
+		if #encoded > 500000 then transfer_status:set("Team exceeds the 500 KB portability limit"); return end
 		ui.save_file({ title = "Export team", name = filename .. ".json", filters = { { "JSON", { "json" } } } }):after(function(file)
 			if not file then return end
-			ui.write_file(file, ui.json.encode(value, { pretty = true })):after(function()
+			ui.write_file(file, encoded):after(function()
 				transfer_status:set("Team exported")
 			end, function(err) transfer_status:set("Could not save file: " .. tostring(err)) end)
 		end, function(err) transfer_status:set("Could not choose location: " .. tostring(err)) end)
@@ -509,7 +586,9 @@ local Builder = ui.component(function()
 		local curves = edge_curves(value)
 		for i, edge in value.edges do
 			local p = curves[i]
-			local label = if edge.condition == "pass" then "Pass" elseif edge.condition == "fail" then (if edge.max_retries then "Fail · retry " .. tostring(edge.max_retries) else "Fail") else nil
+			local from = graph.node(value, edge.from)
+			local is_check = from and from.kind == "check"
+			local label = if edge.condition == "pass" then (if is_check then "Yes" else "Pass") elseif edge.condition == "fail" then (if is_check then "No" elseif edge.max_retries then "Fail · retry " .. tostring(edge.max_retries) else "Fail") else nil
 			if p then line(p, if i == edge_index then "$accent" else "$text.secondary", label) end
 		end
 		if pending then
@@ -545,12 +624,14 @@ local Builder = ui.component(function()
 			c:text(fit_text(node.name, 140 * z, 14 * z), x + 44 * z, y + 24 * z, { size = 14 * z, color = "$text.primary", baseline = "middle" })
 			if node.kind ~= "finish" then
 				local provider = if node.provider and node.provider ~= "" then node.provider else string.match(node.model or "", "^([^/]+)/") or ""
-				local model_name = if node.model ~= "" then string.match(node.model, "^[^/]+/(.+)$") or node.model else "Default model"
-				local detail = if provider ~= "" then provider .. " / " .. model_name else model_name
+				local model_name = if (node.model or "") ~= "" then string.match(node.model, "^[^/]+/(.+)$") or node.model else "Default model"
+				local roles = 0
+				if (node.kind == "team" or node.kind == "foreach") and node.team then for _, child in node.team.nodes do if child.kind ~= "chief" and child.kind ~= "finish" then roles += 1 end end end
+				local detail = if node.kind == "team" or node.kind == "foreach" then tostring(roles) .. (if roles == 1 then " role" else " roles") elseif provider ~= "" then provider .. " / " .. model_name else model_name
 				c:text(fit_text(detail, 172 * z, 11 * z), x + 36 * z, y + 51 * z, { size = 11 * z, color = "$text.secondary", baseline = "middle" })
 				c:rect(x + 12 * z, y + 70 * z, (width - 24) * z, 32 * z, "$zeron.secondary.bg", 6 * z)
 				c:circle(x + 24 * z, y + 86 * z, 3 * z, "$text.tertiary")
-				c:text(if node.kind == "chief" then "Entry point" else "Configured role", x + 34 * z, y + 86 * z, { size = 11 * z, color = "$text.secondary", baseline = "middle" })
+				c:text(if node.kind == "chief" then "Entry point" elseif node.kind == "team" or node.kind == "foreach" then "Saved team snapshot" elseif node.kind == "changes" then "Change set" elseif node.kind == "check" then "Check: " .. (node.predicate or "docs") elseif node.kind == "collect" then "Collect results" elseif node.kind == "draft" then "Draft review" else "Configured role", x + 34 * z, y + 86 * z, { size = 11 * z, color = "$text.secondary", baseline = "middle" })
 			else
 				c:text("End of team", x + 16 * z, y + 52 * z, { size = 11 * z, color = "$text.secondary", baseline = "middle" })
 			end
@@ -628,7 +709,7 @@ local Builder = ui.component(function()
 			ui.div { absolute = true, left = function() return left(14) end, top = function() return top(44) end, color = "$text.secondary", pointer_events = "none",
 				ui.presence(function() local n = node(); return (if n then n.provider or "" else "") .. ":" .. (if n then n.model or "" else "") .. ":" .. tostring(zoom:get()) end, function()
 					local n, size = node(), 14 * zoom:peek()
-					if not n or n.kind == "finish" then return ui.div {} end
+					if not n or not graph.role(n.kind) then return ui.div {} end
 					local provider = if n.provider and n.provider ~= "" then n.provider else string.match(n.model or "", "^([^/]+)/") or ""
 					local mark = provider_marks[provider]
 					if mark then return Mark { name = mark, size = size, bare = true } end
@@ -646,8 +727,13 @@ local Builder = ui.component(function()
 		local value = graph.copy(team:peek())
 		local node = graph.node(value, selected:peek())
 		if not node then return end
-		node.name, node.instructions, node.harness, node.provider, node.model = name:peek(), instructions:peek(), harness:peek(), model_provider:peek(), model:peek()
-		node.icon, node.icon_name = icon_svg:peek(), icon_name:peek()
+		node.name = name:peek()
+		if node.kind == "check" then node.predicate = predicate:peek() end
+		if node.kind == "foreach" then node.items = if items:peek() ~= "" then items:peek() else nil; node.limit = tonumber(limit:peek()) or 4 end
+		if node.kind ~= "team" and node.kind ~= "foreach" then
+			node.instructions, node.harness, node.provider, node.model = instructions:peek(), harness:peek(), model_provider:peek(), model:peek()
+			node.icon, node.icon_name = icon_svg:peek(), icon_name:peek()
+		end
 		if save(value) then
 			edit_open:set(false)
 			notice:set("Block saved")
@@ -666,9 +752,9 @@ local Builder = ui.component(function()
 				return ui.column { w_full = true, gap = "$space.3",
 					Text { (if from then from.name else edge.from) .. " → " .. (if to then to.name else edge.to), tone = "secondary", wrap = true },
 					Select { value = edge_condition, label = "Condition", w_full = true, options = {
-						{ value = "always", label = "Always" }, { value = "pass", label = "Pass" }, { value = "fail", label = "Fail" },
+						{ value = "always", label = "Always" }, { value = "pass", label = if from and from.kind == "check" then "Yes" else "Pass" }, { value = "fail", label = if from and from.kind == "check" then "No" else "Fail" },
 					} },
-					ui.show(function() return edge_condition:get() == "fail" end, ui.column { w_full = true, gap = "$space.2",
+					ui.show(function() return edge_condition:get() == "fail" and (not from or from.kind ~= "check") end, ui.column { w_full = true, gap = "$space.2",
 						Select { value = edge_retries, label = "Retry limit", options = retry_options, w_full = true },
 						Text { "Required on failure returns. Limit applies to the whole run.", style = "caption", tone = "secondary", wrap = true },
 					}),
@@ -683,15 +769,29 @@ local Builder = ui.component(function()
 			end
 			return ui.column { gap = "$space.2", Text { "Settings", style = "heading" }, Text { "Select a block or connection", tone = "secondary", wrap = true } }
 		end
-		local fields = { TextField { value = name, label = "Name", w_full = true },
-			ui.row { w_full = true, items = "center", gap = "$space.2",
+		local fields = { TextField { value = name, label = "Name", w_full = true } }
+		if node.kind == "team" or node.kind == "foreach" then
+			local names = {}
+			for _, child in node.team.nodes do if child.kind ~= "chief" and child.kind ~= "finish" then table.insert(names, child.name) end end
+			table.insert(fields, Text { "Snapshot: " .. node.team.name, tone = "secondary", wrap = true })
+			table.insert(fields, Text { if #names > 0 then "Roles: " .. table.concat(names, ", ") else "No roles", style = "caption", tone = "secondary", wrap = true })
+		else
+			table.insert(fields, ui.row { w_full = true, items = "center", gap = "$space.2",
 				Button { "Choose icon", tone = "secondary", size = "sm", on_click = choose_icon },
 				ui.show(function() return icon_svg:get() ~= "" end, Button { "Remove icon", tone = "ghost", size = "sm", on_click = function() icon_svg:set(""); icon_name:set("") end }),
-			},
-			ui.show(function() return icon_name:get() ~= "" end, Text { function() return icon_name:get() end, style = "caption", tone = "secondary", wrap = true }),
-			ui.show(function() return icon_error:get() ~= "" end, Text { function() return icon_error:get() end, style = "caption", tone = "danger", wrap = true }),
-		}
-		if node.kind ~= "finish" then
+			})
+			table.insert(fields, ui.show(function() return icon_name:get() ~= "" end, Text { function() return icon_name:get() end, style = "caption", tone = "secondary", wrap = true }))
+			table.insert(fields, ui.show(function() return icon_error:get() ~= "" end, Text { function() return icon_error:get() end, style = "caption", tone = "danger", wrap = true }))
+		end
+		if node.kind == "check" then
+			table.insert(fields, Select { value = predicate, label = "Check", w_full = true, options = { { value = "docs", label = "Documentation" }, { value = "files", label = "Files" }, { value = "ci", label = "CI" } } })
+		elseif node.kind == "foreach" then
+			table.insert(fields, TextArea { value = items, label = "Manual items (one per line, optional)", rows = 3, max_rows = 6, w_full = true })
+			local limits = {}
+			for i = 1, 8 do table.insert(limits, { value = tostring(i), label = tostring(i) }) end
+			table.insert(fields, Select { value = limit, label = "Max items", options = limits, w_full = true })
+		end
+		if node.kind == "chief" or graph.role(node.kind) then
 			table.insert(fields, Select { value = agent, options = agents, label = "Runtime", w_full = true, on_change = function(value)
 				local next_harness = if value == "__custom" then "" else value
 				if harness:peek() ~= next_harness then model:set(""); model_provider:set("") end
@@ -753,7 +853,8 @@ local Builder = ui.component(function()
 		},
 		ui.row { w_full = true, gap = "$space.2", items = "center",
 			Select { value = add_choice, options = add_options, size = "sm", w = 144, name = "Add block", on_change = function(kind)
-				if kind ~= "" then add(kind); add_choice:set("") end
+				if kind == "__saved_team" or kind == "foreach" then saved_team_kind:set(if kind == "foreach" then "foreach" else "team"); saved_team_choice:set(""); saved_team_error:set(""); saved_team_open:set(true) elseif kind ~= "" then add(kind) end
+				add_choice:set("")
 			end },
 			Button { "Team", tone = "secondary", size = "sm", on_click = function() team_open:set(true) end },
 			Button { function() return if grid:get() then "Hide grid" else "Show grid" end, tone = "secondary", size = "sm", on_click = function()
@@ -769,6 +870,8 @@ local Builder = ui.component(function()
 		ui.column { w_full = true, gap = "$space.2",
 			ui.row { w_full = true, items = "center", gap = "$space.2",
 				Button { "Start", size = "sm", disabled = function() local status = runner.state:get().status; return status ~= "idle" and status ~= "finished" end, on_click = function() run_error:set(""); destination_session:set(""); selected_destination = nil; run_open:set(true) end },
+				Button { "Review draft", tone = "secondary", size = "sm", disabled = function() return runner.state:get().draft == nil end, on_click = function() run_error:set(""); draft_open:set(true) end },
+				Button { "Team output", tone = "secondary", size = "sm", disabled = function() return runner.state:get().handoff == nil end, on_click = function() output_open:set(true) end },
 				Button { "Open chat", tone = "secondary", size = "sm", disabled = function() return runner.state:get().chat == nil end, on_click = function()
 					local ok, reason = runner.open_chat()
 					if not ok then run_error:set(reason) end
@@ -812,27 +915,106 @@ local Builder = ui.component(function()
 			},
 		},
 		Text { function() return notice:get() end, style = "caption", tone = "secondary", wrap = true },
+		Dialog { open = saved_team_open, title = "Saved team", size = "md", cancel = "Cancel",
+			confirm = { label = "Add block", on_click = add_saved_team },
+			build = function()
+				return ui.column { w_full = true, gap = "$space.3",
+					Select { value = saved_team_choice, options = saved_team_options, label = "Team", w_full = true },
+					Text { "A copy is saved in this block. Teams containing team blocks cannot be nested.", style = "caption", tone = "secondary", wrap = true },
+					ui.show(function() return saved_team_error:get() ~= "" end, Text { function() return saved_team_error:get() end, style = "caption", tone = "danger", wrap = true }),
+				}
+			end,
+		},
+		Dialog { open = output_open, title = "Team output", size = "md", cancel = "Close",
+			build = function()
+				local handoff = runner.state:peek().handoff
+				local rows = {}
+				if handoff then
+					table.insert(rows, Text { handoff.name, style = "heading", wrap = true })
+					if #(handoff.findings or {}) == 0 then
+						table.insert(rows, Text { "No findings returned", tone = "secondary" })
+					end
+					for _, finding in handoff.findings or {} do
+						local detail = if finding.fallback then " · Report excerpt" else ""
+						local verdict = if finding.verdict then " · " .. finding.verdict else ""
+						table.insert(rows, ui.column { w_full = true, gap = "$space.1",
+							Text { finding.role .. detail .. verdict, tone = "secondary", style = "caption", wrap = true },
+							Text { finding.summary .. (if finding.truncated then "…" else ""), wrap = true },
+							if finding.evidence ~= "" then Text { "Evidence: " .. finding.evidence, style = "caption", tone = "secondary", wrap = true } else nil,
+						})
+					end
+					if handoff.omitted > 0 then
+						table.insert(rows, Text { "Omitted: " .. tostring(handoff.omitted), style = "caption", tone = "secondary" })
+					end
+				end
+				return ui.scroll { w_full = true, h = 320, ui.column { w_full = true, gap = "$space.3", table.unpack(rows) } }
+			end,
+		},
 		Dialog { open = run_open, title = "Start run", size = "md", cancel = "Close",
 			confirm = { label = "Start", on_click = function()
 				local id = destination_session:peek()
 				local destination = if id ~= "" then destination_of(zeron.sessions()[id], zeron.projects()) else nil
-				if not destination or not selected_destination or destination.device ~= selected_destination.device or destination.project ~= selected_destination.project then
+				if not destination or not selected_destination or destination.device ~= selected_destination.device or destination.project ~= selected_destination.project or destination.cwd ~= selected_destination.cwd then
 					run_error:set("Select a valid destination session; reselect it if its destination changed")
 					return
 				end
-				local ok, reason = runner.start(graph.copy(team:peek()), task_text:peek(), selected_destination)
+				local source = if source_kind:peek() == "commit" then { kind = "commit", ref = source_ref:peek() } elseif source_kind:peek() == "compare" then { kind = "compare", base = source_base:peek(), head = source_head:peek() } else { kind = "pr", url = source_url:peek() }
+				local needs_change = false
+				for _, node in team:peek().nodes do if node.kind == "changes" then needs_change = true; break end end
+				if needs_change and ((source.kind == "commit" and not string.find(source.ref, "%S")) or (source.kind == "compare" and (not string.find(source.base, "%S") or not string.find(source.head, "%S"))) or (source.kind == "pr" and not string.find(source.url, "%S"))) then run_error:set("Complete the change source"); return end
+				destination.session = id
+				destination.source = if needs_change then source else nil
+				local ok, reason = runner.start(graph.copy(team:peek()), task_text:peek(), destination)
 				if ok then run_error:set(""); run_open:set(false) else run_error:set(reason) end
 			end },
 			build = function()
 				return ui.column { w_full = true, gap = "$space.3",
 					TextArea { value = task_text, label = "Task", rows = 4, max_rows = 8, w_full = true },
+					ui.show(function()
+						for _, node in team:get().nodes do if node.kind == "changes" then return true end end
+						return false
+					end, ui.column { w_full = true, gap = "$space.2",
+						Select { value = source_kind, label = "Change source", w_full = true, options = { { value = "commit", label = "Commit or ref" }, { value = "compare", label = "Compare refs" }, { value = "pr", label = "GitHub pull request" } } },
+						ui.show(function() return source_kind:get() == "commit" end, TextField { value = source_ref, label = "Commit or ref", w_full = true }),
+						ui.show(function() return source_kind:get() == "compare" end, ui.column { w_full = true, gap = "$space.2", TextField { value = source_base, label = "Base", w_full = true }, TextField { value = source_head, label = "Head", w_full = true } }),
+						ui.show(function() return source_kind:get() == "pr" end, TextField { value = source_url, label = "GitHub PR URL", w_full = true }),
+					}),
 					Select { value = destination_session, options = destination_options, label = "Destination", w_full = true, on_change = function(id)
 						selected_destination = if id ~= "" then destination_of(zeron.sessions()[id], zeron.projects()) else nil
 					end },
 					ui.show(function() return #destination_options() == 1 end, Text { "No valid destination sessions available. Create a session on the intended device or project first.", style = "caption", tone = "danger", wrap = true }),
-					Text { "Roles start new chats on the session’s device and project; the selected session receives no messages. Team and destination are copied at start.", style = "caption", tone = "secondary", wrap = true },
+					Text { "Roles start new chats on the selected session’s device and project. The change source and destination are copied at start; the destination workspace is not editable here.", style = "caption", tone = "secondary", wrap = true },
 					ui.show(function() return run_error:get() ~= "" end, Text { function() return run_error:get() end, style = "caption", tone = "danger", wrap = true }),
 				}
+			end,
+		},
+		Dialog { open = draft_open, title = "Review draft", size = "md", cancel = "Close",
+			confirm = { label = "Append to composer", on_click = function()
+				local draft = runner.state:peek().draft
+				if type(draft) ~= "table" or type(draft.text) ~= "string" or type(draft.session) ~= "string" or not zeron.sessions()[draft.session] then run_error:set("Draft or destination session is unavailable"); return end
+				local current_device = changes.local_device(zeron)
+				local destination = destination_of(zeron.sessions()[draft.session], zeron.projects())
+				if type(current_device) ~= "string" or not destination or destination.device ~= current_device then run_error:set("Draft destination is not on this device or its device is unavailable"); return end
+				local draft_id = tostring(runner.state:peek().run_id) .. ":" .. draft.session
+				if draft_used:peek() == draft_id then run_error:set("This draft was already requested"); return end
+				draft_used:set(draft_id)
+				local ok, err = pcall(function()
+					zeron.compose(draft.text, { session = draft.session })
+					for _, comment in draft.comments or {} do
+						zeron.compose_comment({ file = comment.file, line = comment.line, note = comment.note, side = comment.side, to = comment.to, snippet = comment.snippet, session = draft.session })
+					end
+					zeron.open({ session = draft.session })
+				end)
+				if not ok then run_error:set("Could not request composer update: " .. tostring(err)); return end
+				draft_open:set(false)
+				notice:set("Composer update requested; check the destination draft before sending")
+			end },
+			build = function()
+				local draft = runner.state:peek().draft or {}
+				local rows = { Text { "Nothing is sent. Review the destination composer before sending.", tone = "secondary", wrap = true }, Text { draft.text or "", wrap = true } }
+				for _, comment in draft.comments or {} do table.insert(rows, Text { tostring(comment.file) .. ":" .. tostring(comment.line) .. " · " .. tostring(comment.note), style = "caption", wrap = true }) end
+				table.insert(rows, ui.show(function() return run_error:get() ~= "" end, Text { function() return run_error:get() end, style = "caption", tone = "danger", wrap = true }))
+				return ui.scroll { w_full = true, h = 320, ui.column { w_full = true, gap = "$space.3", table.unpack(rows) } }
 			end,
 		},
 		Dialog { open = recovery_open, title = "Review / abandon", size = "md", cancel = "Cancel",
@@ -860,7 +1042,8 @@ local Builder = ui.component(function()
 					local edge = value.edges[selected_edge:peek()]
 					if not edge then return end
 					edge.condition = edge_condition:peek()
-					edge.max_retries = if edge.condition == "fail" then tonumber(edge_retries:peek()) else nil
+					local from = graph.node(value, edge.from)
+					edge.max_retries = if edge.condition == "fail" and (not from or from.kind ~= "check") then tonumber(edge_retries:peek()) else nil
 					if save(value) then edit_open:set(false); notice:set("Connection saved") end
 				else
 					save_settings()
