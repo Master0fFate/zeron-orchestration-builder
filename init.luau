@@ -149,14 +149,6 @@ local function destination_options()
 	return options
 end
 
-local function current_destination()
-	local session = zeron.context("session")
-	if type(session) ~= "table" or type(session.id) ~= "string" or not string.find(session.id, "%S") then return "", nil end
-	local destination = destination_of(zeron.sessions()[session.id], zeron.projects())
-	if destination then return session.id, destination end
-	return "", nil
-end
-
 local function saved_team_library(value, fallback)
 	return if type(value) == "table" and type(value.teams) == "table" then value else { active = "1", next_id = 2, teams = { { id = "1", team = fallback } } }
 end
@@ -1412,14 +1404,16 @@ local Builder = ui.component(function()
 		if data.last_chat and data.last_chat ~= chat then table.insert(rows, Text { "Last chat: " .. data.last_chat, wrap = true }) end
 		if visit then
 			local receipt = visit.receipt
-			local evidence = if receipt then (if receipt.delivery == "queue" then "Queued receipt: " else "Dispatch receipt: ") .. receipt.id else "Dispatch not sent"
+			local evidence = if unknown_delivery then (if receipt == nil then "No saved receipt; delivery is unknown" else "Unconfirmed dispatch receipt")
+				elseif data.phase == "dispatch_not_sent" then "Dispatch not sent"
+				else (if receipt.delivery == "queue" then "Queued receipt: " else "Dispatch receipt: ") .. receipt.id
 			table.insert(rows, Text { evidence, wrap = true })
 		end
 		local chats, receipts = {}, {}
 		local function collect(saved)
 			for _, step in ipairs(saved.visits) do
 				local receipt = step.receipt
-				if receipt then
+				if receipt and not (unknown_delivery and step == visit) then
 					if not receipts[receipt.chat] then table.insert(chats, receipt.chat) end
 					receipts[receipt.chat] = receipt
 				end
@@ -1436,16 +1430,16 @@ local Builder = ui.component(function()
 					Text { id, wrap = true, w_full = true },
 					Text { label .. receipt.id, style = "caption", tone = "secondary", wrap = true, w_full = true },
 				},
-				Button { "Open chat", size = "sm", tone = "secondary", on_click = function()
-					if reviewing() then zeron.open({ session = id }) end
+				Button { "Open chat", size = "sm", tone = "secondary", disabled = function() return type(zeron.sessions()[id]) ~= "table" end, on_click = function()
+					if reviewing() and type(zeron.sessions()[id]) == "table" then zeron.open({ session = id }) end
 				end },
 			})
 		end
 		return ui.column { w_full = true, gap = "$space.3",
-			if unknown_delivery then Text { "Delivery is unknown. External work may still run. Inspect the saved chats before confirming; this only releases Builder’s slot and never resends.", tone = "danger", wrap = true } else nil,
+			if unknown_delivery then Text { "Delivery is unknown. External work may still run. Inspect the destination and Run details before confirming; this only releases Builder’s slot and never resends.", tone = "danger", wrap = true } else nil,
 			ui.scroll { w_full = true, max_h = 260, ui.column { w_full = true, gap = "$space.2", table.unpack(rows) } },
 			ui.row { w_full = true, justify = "end",
-				Button { if unknown_delivery then "Abandon despite unknown delivery" else "Abandon run" end, tone = "danger", disabled = function() return not runner.state:get().can_abandon end, on_click = function()
+				Button { if unknown_delivery then "Abandon despite unknown delivery" else "Abandon run", tone = "danger", disabled = function() return not runner.state:get().can_abandon end, on_click = function()
 					if not reviewing() then return end
 					recovery_result:set(0)
 					recovery_review = nil
@@ -1514,9 +1508,8 @@ local Builder = ui.component(function()
 			ui.row { w_full = true, items = "center", gap = "$space.2", flex_wrap = true,
 				Button { "Start", size = "sm", disabled = function() local status = runner.state:get().status; return status ~= "idle" and status ~= "finished" and status ~= "stopped" end, on_click = function()
 					run_error:set("")
-					local id, destination = current_destination()
-					manual_input.session:set(id)
-					manual_input.destination = destination
+					manual_input.session:set("")
+					manual_input.destination = nil
 					run_open:set(true)
 				end },
 				Button { "Review draft", tone = "secondary", size = "sm", disabled = function() return runner.state:get().draft == nil end, on_click = function() run_error:set(""); draft_open:set(true) end },

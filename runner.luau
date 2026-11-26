@@ -632,8 +632,8 @@ function M.create(zeron, graph)
 	local function save_halted_receipt(run, valid_receipt)
 		run.receipt_pending = true
 		local receipt = run.visit and run.visit.receipt
-		if type(receipt) == "table" and receipt.delivery == "queue" then
-			run.reason ..= "; queued message may still execute: chat " .. tostring(receipt.chat) .. ", message " .. tostring(receipt.id) .. "; do not resend"
+		if valid_receipt and receipt.delivery == "queue" then
+			run.reason ..= "; queued message may still execute: chat " .. receipt.chat .. ", message " .. receipt.id .. "; do not resend"
 		elseif valid_receipt then
 			run.reason ..= "; chat receipt received"
 		else
