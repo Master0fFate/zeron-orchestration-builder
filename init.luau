@@ -149,6 +149,13 @@ local function destination_options()
 	return options
 end
 
+local function current_destination()
+	local session = zeron.context("session")
+	if type(session) ~= "table" or type(session.id) ~= "string" or not string.find(session.id, "%S") then return "", nil end
+	local destination = destination_of(zeron.sessions()[session.id], zeron.projects())
+	return if destination then session.id, destination else "", nil
+end
+
 local function saved_team_library(value, fallback)
 	return if type(value) == "table" and type(value.teams) == "table" then value else { active = "1", next_id = 2, teams = { { id = "1", team = fallback } } }
 end
@@ -1490,8 +1497,9 @@ local Builder = ui.component(function()
 			ui.row { w_full = true, items = "center", gap = "$space.2", flex_wrap = true,
 				Button { "Start", size = "sm", disabled = function() local status = runner.state:get().status; return status ~= "idle" and status ~= "finished" and status ~= "stopped" end, on_click = function()
 					run_error:set("")
-					manual_input.session:set("")
-					manual_input.destination = nil
+					local id, destination = current_destination()
+					manual_input.session:set(id)
+					manual_input.destination = destination
 					run_open:set(true)
 				end },
 				Button { "Review draft", tone = "secondary", size = "sm", disabled = function() return runner.state:get().draft == nil end, on_click = function() run_error:set(""); draft_open:set(true) end },
@@ -1625,7 +1633,7 @@ local Builder = ui.component(function()
 			end },
 			build = function()
 				return ui.column { w_full = true, gap = "$space.3",
-					Text { "Stop the originating runner first. Inspect the saved chats and stop any in-flight agents or queued messages before abandoning.", tone = "danger", wrap = true },
+					Text { "Stop the originating runner first. Inspect the saved chats and stop any in-flight agents or queued messages before abandoning. Builder cannot verify that work has stopped; external work may still run.", tone = "danger", wrap = true },
 					Text { "Abandoning releases the journal lock. It does not cancel work or resend messages.", tone = "secondary", wrap = true },
 					ui.presence(function() return recovery_result:get() end, recovery_controls, { w_full = true }),
 				}
