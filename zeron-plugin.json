@@ -1,0 +1,83 @@
+{
+  "commands": [
+    "git"
+  ],
+  "description": "Build and run agent teams from reusable workflow presets.",
+  "entry": "init.luau",
+  "icon": "icon.svg",
+  "id": "orchestrator-builder",
+  "name": "Orchestrator Builder",
+  "permissions": [
+    "pages.add",
+    "models.read",
+    "files",
+    "messages.send",
+    "messages.read",
+    "sessions.read",
+    "navigate",
+    "tools",
+    "ui.add",
+    "files.read",
+    "devices",
+    "github",
+    "compose",
+    "draft",
+    "commands"
+  ],
+  "tools": [
+    {
+      "description": "Submit the current orchestrator step report, optional review decision, and optional evidence-backed findings.",
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "findings": {
+            "description": "Up to four findings for the Team handoff.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "evidence": {
+                  "description": "Concrete supporting evidence, at most 1024 bytes.",
+                  "type": "string"
+                },
+                "summary": {
+                  "description": "Short statement of the finding, at most 512 bytes.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "summary",
+                "evidence"
+              ],
+              "type": "object"
+            },
+            "maxItems": 4,
+            "type": "array"
+          },
+          "nonce": {
+            "description": "Exact step reference from the task.",
+            "type": "string"
+          },
+          "report": {
+            "description": "Short human-readable report, at most 8192 bytes.",
+            "type": "string"
+          },
+          "result": {
+            "description": "Decision for a conditional review step only.",
+            "enum": [
+              "pass",
+              "fail"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "nonce",
+          "report"
+        ],
+        "type": "object"
+      },
+      "name": "submit_report"
+    }
+  ],
+  "version": "0.9.1"
+}
