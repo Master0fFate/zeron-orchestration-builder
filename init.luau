@@ -305,8 +305,17 @@ local function start_dialog(open, input, error_state, current_team, request, can
 		local id = if request then request.origin else input.session:peek()
 		local captured = if request then request.destination else input.destination
 		local destination = if id ~= "" then destination_of(zeron.sessions()[id], zeron.projects()) else nil
-		if not same_destination(destination, captured) or (request and destination.device ~= changes.local_device(zeron)) then
-			error_state:set(if request then "Chat location changed or is unavailable. Discard copy, then use Run team again from the intended chat." else "Select a valid destination session; reselect it if its destination changed")
+		local local_device = changes.local_device(zeron)
+		if not destination then
+			error_state:set(if request then "Chat location is unavailable. Discard copy, then use Run team again from the intended chat." else "Select a valid destination session")
+			return
+		end
+		if destination.device ~= local_device then
+			error_state:set("Remote destinations are unsupported. Select a session on this device.")
+			return
+		end
+		if not same_destination(destination, captured) then
+			error_state:set(if request then "Chat location changed. Discard copy, then use Run team again from the intended chat." else "Destination changed; reselect the session")
 			return
 		end
 		if needs_changes(value) then
@@ -1377,6 +1386,7 @@ local Builder = ui.component(function()
 			return recovery_open:peek() and recovery_request == request and recovery_result:peek() == request
 		end
 		local data = review.data
+		local unknown_delivery = data.phase == "dispatching" or data.phase == "dispatch_unknown"
 		local frame, snapshot_team = data, data.graph
 		if data.active_frame and data.active_frame ~= "root" then
 			frame = data.children[#data.children]
@@ -1392,7 +1402,12 @@ local Builder = ui.component(function()
 			Text { "Block: " .. (if frame == data then "" else data.active_frame .. " / ") .. block, wrap = true },
 			if review.reason ~= "" then Text { review.reason, tone = "secondary", wrap = true } else nil,
 		}
-		if chat then table.insert(rows, Text { "Step chat: " .. chat, wrap = true }) end
+		if chat then table.insert(rows, ui.row { w_full = true, gap = "$space.2", items = "center",
+			Text { "Step chat: " .. chat, wrap = true, grow = 1, min_w = 0 },
+			Button { "Open chat", size = "sm", tone = "secondary", disabled = function() return type(zeron.sessions()[chat]) ~= "table" end, on_click = function()
+				if reviewing() and type(zeron.sessions()[chat]) == "table" then zeron.open({ session = chat }) end
+			end },
+		}) end
 		if data.last_chat and data.last_chat ~= chat then table.insert(rows, Text { "Last chat: " .. data.last_chat, wrap = true }) end
 		if visit then
 			local receipt = visit.receipt
@@ -1426,9 +1441,10 @@ local Builder = ui.component(function()
 			})
 		end
 		return ui.column { w_full = true, gap = "$space.3",
+			if unknown_delivery then Text { "Delivery is unknown. External work may still run. Inspect the saved chats before confirming; this only releases Builder’s slot and never resends.", tone = "danger", wrap = true } else nil,
 			ui.scroll { w_full = true, max_h = 260, ui.column { w_full = true, gap = "$space.2", table.unpack(rows) } },
 			ui.row { w_full = true, justify = "end",
-				Button { "Abandon run", tone = "danger", disabled = function() return not runner.state:get().can_abandon end, on_click = function()
+				Button { if unknown_delivery then "Abandon despite unknown delivery" else "Abandon run" end, tone = "danger", disabled = function() return not runner.state:get().can_abandon end, on_click = function()
 					if not reviewing() then return end
 					recovery_result:set(0)
 					recovery_review = nil

@@ -311,15 +311,20 @@ function M.create(zeron, graph)
 			if team_name then reason = team_name .. (if role_name then " / " .. role_name else "") .. ": " .. reason end
 		end
 		local recovering = status == "blocked" or status == "interrupted"
-		local recoverable = recovering and run and run.recoverable == true and not run.write_unknown and not unknown_dispatch(run.phase)
+		local recoverable = recovering and run and run.recoverable == true and not run.write_unknown
 		if recoverable then
 			if run.commit_pending then reason ..= "; completion commit is pending and cannot be abandoned" end
-			reason ..= ". Stop the originating runner and any in-flight or queued work before abandoning. This window cannot verify that work has stopped or cancel it"
+			if unknown_dispatch(run.phase) then
+				reason ..= ". Delivery is unknown; inspect the destination and Run details. External work may still run. Do not resend"
+				if run.phase == "dispatch_unknown" then reason ..= ". Any saved receipt for this step is unconfirmed" end
+			else
+				reason ..= ". Stop the originating runner and any in-flight or queued work before abandoning. This window cannot verify that work has stopped or cancel it"
+			end
 		elseif recovering and run and unknown_dispatch(run.phase) then
 			if run.dispatch_refused then
 				reason ..= ". " .. run.dispatch_refused .. ". This window did not confirm the refusal checkpoint; review the journal manually"
 			else
-				reason ..= ". Delivery is unknown; inspect the destination and Run details. Do not resend"
+				reason ..= ". Delivery is unknown; inspect the destination and Run details. External work may still run. Do not resend"
 				if run.phase == "dispatch_unknown" then reason ..= ". Any saved receipt for this step is unconfirmed" end
 			end
 		end
@@ -1023,6 +1028,10 @@ function M.create(zeron, graph)
 		if type(destination) ~= "table" or not nonblank(destination.device) or (destination.project ~= nil and not nonblank(destination.project)) then
 			return false, "Select a valid run destination"
 		end
+		local local_device = changes.local_device(zeron)
+		if not nonblank(local_device) or destination.device ~= local_device then
+			return false, "Remote destinations are unsupported; select a destination on this device"
+		end
 		if destination.cwd ~= nil then
 			local valid_cwd = if destination.session == nil then changes.valid_checkout_path(destination.cwd) else text_ok(destination.cwd, 4096)
 			if not valid_cwd then return false, "Select a destination with a valid working folder" end
@@ -1117,7 +1126,7 @@ function M.create(zeron, graph)
 
 	local function abandonment_error(run, in_progress, refreshing)
 		if not ready or not run or recovery ~= run or (not refreshing and not run.recoverable) then return "No recoverable blocked or interrupted run" end
-		if run.write_unknown or (not refreshing and unknown_dispatch(run.phase)) then return "Journal or dispatch outcome is unknown; review it manually" end
+		if run.write_unknown then return "Journal outcome is unknown; review it manually" end
 		if abandoning and not in_progress then return "Abandonment is still pending" end
 		if run.claim_pending then return "Journal claim is still pending" end
 		if run.commit_pending then return "Completion commit is still pending" end
@@ -1173,7 +1182,6 @@ function M.create(zeron, graph)
 			row, data = saved, active_data(saved, graph)
 		end
 		if not data or type(row.reason) ~= "string" then return nil, "No valid active run to abandon; review the journal manually" end
-		if unknown_dispatch(data.phase) then return nil, "Dispatch outcome is unknown; inspect the destination and do not resend" end
 		local review = { id = id, status = row.status, reason = row.reason, data = data }
 		abandon_reviews[review] = { run = run, row = row }
 		return review
@@ -1199,7 +1207,7 @@ function M.create(zeron, graph)
 				return
 			end
 			local ok, result = pcall(function()
-				return zeron.db.exec("UPDATE orchestrator_runs SET active = 0, status = 'abandoned', reason = ? WHERE id = ? AND active = ? AND status = ? AND reason = ? AND data = ?", { "Abandoned after user acknowledgment; in-flight and queued messages were not canceled", row.id, row.active, row.status, row.reason, row.data }):await()
+				return zeron.db.exec("UPDATE orchestrator_runs SET active = 0, status = 'abandoned', reason = ? WHERE id = ? AND active = ? AND status = ? AND reason = ? AND data = ?", { "Abandoned after user acknowledgment; external work was not canceled and may still run", row.id, row.active, row.status, row.reason, row.data }):await()
 			end)
 			local count = if ok and type(result) == "table" then result.changes else nil
 			if count ~= 1 and run.commit_unknown then
@@ -1221,7 +1229,7 @@ function M.create(zeron, graph)
 			end
 			run.recoverable = false
 			recovery = nil
-			show("idle", "Run abandoned; in-flight and queued messages were not canceled", run)
+			show("idle", "Run abandoned; external work was not canceled and may still run", run)
 		end)
 		return true
 	end

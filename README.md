@@ -119,9 +119,9 @@ Use **Run frame** to switch between the root team and saved child frames from sa
 
 Inspect **Run details** and the run chats before choosing **Abandon run** in **Review run**. The main **Open chat** control may point to an earlier block or be unavailable. If another Zeron window still owns the run, stop the runner there first. Stop or resolve any in-flight turns and queued messages before confirming. Builder cannot verify that work has stopped.
 
-Builder validates the active checkpoint on recovery and rereads it before abandoning. It checks that the saved phase, role visits, chats, receipts and reports agree where required. It refuses abandonment while a dispatch or journal write is pending, when the write or dispatch outcome is unknown, or when it cannot validate the active entry. It only marks the run abandoned if the validated checkpoint still matches at the time of the update. Watch the status and reason for the result: successful abandonment releases the journal lock but does not cancel work, resend messages or restart the run.
+Builder validates the active checkpoint on recovery and rereads it before abandoning. It checks that the saved phase, role visits, chats, receipts and reports agree where required. It refuses abandonment while a dispatch or journal write is still pending, or when it cannot validate the active entry. An unknown dispatch can be abandoned deliberately after pending operations settle, but inspect the destination and chats first: external work may still run. It only marks the run abandoned if the validated checkpoint still matches at the time of the update. Watch the status and reason for the result: successful abandonment releases the journal lock but does not cancel work, resend messages or restart the run.
 
-If dispatch remains unresolved after pending operations settle, inspect the destination’s session list and the journal manually. Do not resend. Builder will not abandon that run through the UI: its active slot stays locked, blocking new runs.
+If dispatch remains unresolved after pending operations settle, inspect the destination’s session list and the journal manually, stop any work you can, then use **Abandon run** if the checkpoint is valid. Do not resend. Abandoning releases the active slot; it does not prove that external work stopped.
 
 ## Development
 
