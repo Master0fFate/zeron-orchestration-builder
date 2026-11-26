@@ -1021,15 +1021,22 @@ function M.create(zeron, graph)
 		if current and not current.halted then return false, "A run is already active" end
 		if not nonblank(taskText) then return false, "Enter a task" end
 		if type(destination) ~= "table" or not nonblank(destination.device) or (destination.project ~= nil and not nonblank(destination.project)) then
-			return false, "Select a valid destination session"
+			return false, "Select a valid run destination"
 		end
-		if destination.cwd ~= nil and not text_ok(destination.cwd, 4096) then return false, "Select a session with a valid working folder" end
+		if destination.cwd ~= nil then
+			local valid_cwd = if destination.session == nil then changes.valid_checkout_path(destination.cwd) else text_ok(destination.cwd, 4096)
+			if not valid_cwd then return false, "Select a destination with a valid working folder" end
+		end
 		local chosen = { device = destination.device, project = destination.project, session = capture_text(destination.session, 512),
 			cwd = destination.cwd, source = capture_source(destination.source) }
 		local ok, team, err = pcall(graph.import, snapshot)
 		if not ok or not team then return false, tostring(if ok then err else team) end
 		local valid, issues = pcall(graph.validate, team)
 		if not valid or #issues > 0 then return false, if valid then issues[1].message else tostring(issues) end
+		if not chosen.session then
+			local required = graph.session_requirement(team)
+			if required then return false, required .. " needs an existing chat. Choose another team or start from a chat." end
+		end
 		local first = chief_exit(team)
 		if not first then return false, "Chief has no route" end
 		generation += 1

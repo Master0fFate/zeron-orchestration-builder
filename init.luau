@@ -49,8 +49,10 @@ local commit_request = ui.state("orchestrator-builder.commit-request", nil)
 local composer_request = ui.state("orchestrator-builder.composer-request", nil)
 local composer_request_id = 0
 local composer_placement_id = 0
-local composer_owner = ui.state("orchestrator-builder.composer-owner", 0)
-local composer_host = ui.state("orchestrator-builder.composer-host", "")
+local composer_binding_id = 0
+local composer_binding = ui.state("orchestrator-builder.composer-binding", nil)
+local composer_project = ui.state("orchestrator-builder.composer-project", nil)
+local composer_target = ui.state("orchestrator-builder.composer-target", nil)
 local composer_team = ui.state("orchestrator-builder.composer-team", "")
 local composer_graph = ui.state("orchestrator-builder.composer-graph", nil)
 local composer_submitted = ui.state("orchestrator-builder.composer-submitted", false)
@@ -74,6 +76,43 @@ local function destination_of(session, projects)
 	if not cwd and session.worktree == true then return nil end
 	if not cwd and project and type(projects[project].path) == "string" and string.find(projects[project].path, "%S") then cwd = projects[project].path end
 	return { device = device, project = project, cwd = cwd }
+end
+
+local function composer_location(route)
+	if not route then return nil end
+	if route.name == "home" then return "" end
+	if route.name == "session" and type(route.session) == "string" and string.find(route.session, "%S") then return route.session end
+	return nil
+end
+
+local function home_destination(id, device, projects)
+	if type(device) ~= "string" or not string.find(device, "%S") then return nil end
+	if id == "" then return { device = device } end
+	if type(id) ~= "string" or not string.find(id, "%S") then return nil end
+	local project = projects[id]
+	if type(project) ~= "table" or project.device ~= device or not changes.valid_checkout_path(project.path) then return nil end
+	return { device = device, project = id, cwd = project.path }
+end
+
+local function home_project_options()
+	local device = changes.local_device(zeron, true)
+	local projects = zeron.projects()
+	local options = {}
+	for id, project in projects do
+		if home_destination(id, device, projects) then
+			table.insert(options, { value = id, label = project.name or id, description = project.path })
+		end
+	end
+	table.sort(options, function(a, b)
+		if a.label ~= b.label then return a.label < b.label end
+		return a.description < b.description
+	end)
+	table.insert(options, 1, { value = "", label = "No project (local)", disabled = device == nil })
+	return options
+end
+
+local function same_destination(a, b)
+	return a and b and a.device == b.device and a.project == b.project and a.cwd == b.cwd
 end
 
 local function destination_label(id, session, destination)
@@ -195,31 +234,18 @@ local function needs_changes(value)
 	return false
 end
 
-local function start_dialog(open, input, error_state, current_team, request, owner, discard)
-	local function start()
-		if not open:peek() then return end
-		if request then
-			local pending, route = composer_request:peek(), window_route:peek()
-			if not pending or pending.id ~= request.id or composer_submitted:peek() or composer_owner:peek() ~= owner
-				or not route or route.name ~= "session" or route.session ~= request.session then return end
-		end
-		local id = if request then request.session else input.session:peek()
-		local captured = if request then request.destination else input.destination
-		local destination = if id ~= "" then destination_of(zeron.sessions()[id], zeron.projects()) else nil
-		if not destination or not captured or destination.device ~= captured.device or destination.project ~= captured.project or destination.cwd ~= captured.cwd
-			or (request and destination.device ~= changes.local_device(zeron)) then
-			error_state:set(if request then "Chat location changed or is unavailable. Discard copy, then use Run team again from the intended chat." else "Select a valid destination session; reselect it if its destination changed")
-			return
-		end
-		local value = current_team()
-		if not value then error_state:set("Select an available team"); return end
-		if needs_changes(value) then
-			local source = change_source(input)
-			if (source.kind == "commit" and not string.find(source.ref, "%S")) or (source.kind == "compare" and (not string.find(source.base, "%S") or not string.find(source.head, "%S"))) or (source.kind == "pr" and not string.find(source.url, "%S")) then error_state:set("Complete the change source"); return end
-			destination.source = source
-		end
-		destination.session = id
-		local ok, reason = runner.start(graph.copy(value), input.task:peek(), destination)
+local function home_working_folder()
+	return ui.presence(function() return composer_target:get() end, function(target)
+		return if target.cwd then ui.column { selectable = true, w_full = true,
+			Text { target.cwd, style = "mono", w_full = true, wrap = true },
+		} else Text { "Zeron gives each role chat its own local scratch folder. No project files are selected.", style = "caption", tone = "secondary", wrap = true }
+	end)
+end
+
+local function start_dialog(open, input, error_state, current_team, request, can_start, discard, checking_folder)
+	local home = request and request.origin == ""
+	local function launch(value, task, destination)
+		local ok, reason = runner.start(graph.copy(value), task, destination)
 		if not ok then error_state:set(reason); return end
 		if request then
 			composer_submitted:set(true)
@@ -231,39 +257,104 @@ local function start_dialog(open, input, error_state, current_team, request, own
 		open:set(false)
 		if request then zeron.toast("Run requested. Track its progress in Orchestrator Builder") end
 	end
-	local function in_original_chat()
-		return composer_host:get() == request.session
+	local function start()
+		if not open:peek() or (request and (not can_start() or composer_submitted:peek() or checking_folder:peek())) then return end
+		local value, task = current_team(), input.task:peek()
+		if not value then error_state:set("Select an available team"); return end
+		if not string.find(task, "%S") then error_state:set("Enter a task"); return end
+		if home then
+			local required = graph.session_requirement(value)
+			if required then error_state:set(required .. " needs an existing chat. Choose another team or start from a chat."); return end
+			local selected, captured = composer_project:peek(), composer_target:peek()
+			local function destination_now()
+				return home_destination(selected, changes.local_device(zeron), zeron.projects())
+			end
+			local destination = destination_now()
+			local changed = "Project location changed or is unavailable. Select the destination again."
+			if selected == nil then error_state:set("Choose a local project or No project (local)"); return end
+			if not same_destination(destination, captured) then error_state:set(changed); return end
+			if not destination.cwd then launch(value, task, destination); return end
+			local team_id = composer_team:peek()
+			error_state:set("")
+			checking_folder:set(true)
+			ui.task(function()
+				local ok, result = pcall(function()
+					return zeron.run("git", { "--version" }, { cwd = destination.cwd, timeout = 5 }):await()
+				end)
+				if not open:peek() or not can_start() or composer_submitted:peek() then return end
+				checking_folder:set(false)
+				if selected ~= composer_project:peek() or team_id ~= composer_team:peek() or task ~= input.task:peek()
+					or not same_store_value(value, composer_graph:peek()) or not same_destination(destination, composer_target:peek()) then
+					error_state:set("Run inputs changed. Review them and choose Start again."); return
+				end
+				if not same_destination(destination, destination_now()) then error_state:set(changed); return end
+				if not ok or type(result) ~= "table" or result.status ~= 0 then
+					error_state:set("Couldn’t verify the project folder. Check that it exists and Git is available on this device."); return
+				end
+				launch(value, task, destination)
+			end)
+			return
+		end
+		local id = if request then request.origin else input.session:peek()
+		local captured = if request then request.destination else input.destination
+		local destination = if id ~= "" then destination_of(zeron.sessions()[id], zeron.projects()) else nil
+		if not same_destination(destination, captured) or (request and destination.device ~= changes.local_device(zeron)) then
+			error_state:set(if request then "Chat location changed or is unavailable. Discard copy, then use Run team again from the intended chat." else "Select a valid destination session; reselect it if its destination changed")
+			return
+		end
+		if needs_changes(value) then
+			local source = change_source(input)
+			if (source.kind == "commit" and not string.find(source.ref, "%S")) or (source.kind == "compare" and (not string.find(source.base, "%S") or not string.find(source.head, "%S"))) or (source.kind == "pr" and not string.find(source.url, "%S")) then error_state:set("Complete the change source"); return end
+			destination.source = source
+		end
+		destination.session = id
+		launch(value, task, destination)
 	end
 	return Dialog { open = open, title = "Start run", size = "md", cancel = "Close", tone = if request then "danger" else nil,
 		body = if request then function()
-			if not in_original_chat() then return "Return to the original chat to start this copy." end
-			local err = error_state:get()
-			return if err ~= "" then err else "Runs the saved team captured when selected. Unsaved Builder edits aren’t included."
+			if not can_start() then return if home then "Return to New chat to start this copy." else "Return to the original chat to start this copy." end
+			return if home then "Choose the destination here. Role chats use Zeron’s defaults unless a role specifies a runtime or model. New chat settings aren’t inherited."
+				else "Runs the saved team captured when selected. Unsaved Builder edits aren’t included."
 		end else nil,
 		aside = if request then { label = "Discard copy", on_click = discard } else nil,
 		confirm = { label = "Start", keep_open = true, on_click = start,
-			disabled = if request then function() return composer_submitted:get() or not in_original_chat() end else nil,
+			busy = if home then function() return checking_folder:get() end else nil,
+			disabled = if request then function() return composer_submitted:get() or not can_start() or (home and composer_target:get() == nil) end else nil,
 		},
 		build = function()
 			return ui.column { w_full = true, gap = "$space.3",
-				if request then composer_destination(request) else nil,
+				if request and not home then composer_destination(request) else nil,
 				if request then Select { value = composer_team, options = composer_team_options, label = "Saved team", w_full = true,
-					on_change = function(id) capture_composer_team(composer_library(), id) end,
+					disabled = function() return checking_folder:get() end,
+					on_change = function(id) capture_composer_team(composer_library(), id); error_state:set("") end,
+				} else nil,
+				if home then ui.column { w_full = true, gap = "$space.2",
+					Select { value = composer_project, options = home_project_options, label = "Local destination", placeholder = "Choose a project or no project", w_full = true,
+						disabled = function() return checking_folder:get() end,
+						on_change = function(id)
+							local target = home_destination(id, changes.local_device(zeron), zeron.projects())
+							composer_target:set(target)
+							error_state:set(if target then "" else "That destination is unavailable on this device.")
+						end,
+					},
+					home_working_folder(),
 				} else nil,
 				TextArea { value = input.task, label = "Task", rows = 4, max_rows = 8, w_full = true },
-				ui.show(function() return needs_changes(current_team()) end, ui.column { w_full = true, gap = "$space.2",
+				if not home then ui.show(function() return needs_changes(current_team()) end, ui.column { w_full = true, gap = "$space.2",
 					Select { value = input.kind, label = "Change source", w_full = true, options = { { value = "commit", label = "Commit or ref" }, { value = "compare", label = "Compare refs" }, { value = "pr", label = "GitHub pull request" } } },
 					ui.show(function() return input.kind:get() == "commit" end, TextField { value = input.ref, label = "Commit or ref", w_full = true }),
 					ui.show(function() return input.kind:get() == "compare" end, ui.column { w_full = true, gap = "$space.2", TextField { value = input.base, label = "Base", w_full = true }, TextField { value = input.head, label = "Head", w_full = true } }),
 					ui.show(function() return input.kind:get() == "pr" end, TextField { value = input.url, label = "GitHub PR URL", w_full = true }),
-				}),
-				if request then nil else Select { value = input.session, options = destination_options, label = "Destination", w_full = true, on_change = function(id)
-					input.destination = if id ~= "" then destination_of(zeron.sessions()[id], zeron.projects()) else nil
-				end },
-				if request then Text { "Only draft text is copied. Quotes, other composer context, and chat history are not forwarded. Your original draft stays unsent.", style = "caption", tone = "secondary", wrap = true }
-				else ui.show(function() return #destination_options() == 1 end, Text { "No valid destination sessions available. Create a session on the intended device or project first.", style = "caption", tone = "danger", wrap = true }),
-				Text { "Roles start new chats on the selected device and project, using its working folder when available. You can’t change that folder here.", style = "caption", tone = "secondary", wrap = true },
-				if not request then ui.show(function() return error_state:get() ~= "" end, Text { function() return error_state:get() end, style = "caption", tone = "danger", wrap = true }) else nil,
+				}) else nil,
+				if request then Text { "Only draft text is copied. Quotes, other composer context, and chat history aren’t forwarded. Your original draft stays untouched and unsent.", style = "caption", tone = "secondary", wrap = true }
+				else ui.column { w_full = true, gap = "$space.2",
+					Select { value = input.session, options = destination_options, label = "Destination", w_full = true, on_change = function(id)
+						input.destination = if id ~= "" then destination_of(zeron.sessions()[id], zeron.projects()) else nil
+					end },
+					ui.show(function() return #destination_options() == 1 end, Text { "No valid destination sessions available. Create a session on the intended device or project first.", style = "caption", tone = "danger", wrap = true }),
+				},
+				if not home then Text { "Roles start new chats on the selected device and project, using its working folder when available. You can’t change that folder here.", style = "caption", tone = "secondary", wrap = true } else nil,
+				ui.show(function() return error_state:get() ~= "" end, Text { function() return error_state:get() end, style = "caption", tone = "danger", wrap = true }),
 			}
 		end,
 	}
@@ -276,21 +367,27 @@ end, "")
 local ComposerStart = ui.component(function(props)
 	local open = ui.use_state(true)
 	local error_state = ui.use_state("")
-	local request, owner = props.request, props.owner
+	local checking_folder = ui.use_state(false)
+	local request, binding = props.request, props.binding
 	local function owns_copy()
-		local pending = composer_request:peek()
-		return pending and pending.id == request.id and composer_owner:peek() == owner
+		local pending, active = composer_request:get(), composer_binding:get()
+		return pending and pending.id == request.id and active and active.id == binding.id
+	end
+	local function can_start()
+		return owns_copy() and binding.host == request.origin and props.location() == request.origin
 	end
 	ui.effect(function()
-		if not open:get() and owns_copy() then composer_owner:set(0) end
+		if not open:get() and owns_copy() then composer_binding:set(nil) end
 	end)
+	ui.on_cleanup(function() checking_folder:set(false) end)
 	local function discard()
 		if not owns_copy() then return end
 		ui.batch(function()
-			composer_owner:set(0)
-			composer_host:set("")
+			composer_binding:set(nil)
 			composer_request:set(nil)
 			composer_submitted:set(false)
+			composer_project:set(nil)
+			composer_target:set(nil)
 			composer_input.task:set("")
 			composer_input.kind:set("commit")
 			composer_input.ref:set("")
@@ -302,7 +399,7 @@ local ComposerStart = ui.component(function(props)
 		end)
 	end
 	if not composer_submitted:peek() then
-		return start_dialog(open, composer_input, error_state, function() return composer_graph:get() end, request, owner, discard)
+		return start_dialog(open, composer_input, error_state, function() return composer_graph:get() end, request, can_start, discard, checking_folder)
 	end
 	local saved, source = composer_graph:peek(), change_source(composer_input)
 	local source_label = if source.kind == "commit" then source.ref elseif source.kind == "compare" then source.base .. " → " .. source.head else source.url
@@ -310,7 +407,10 @@ local ComposerStart = ui.component(function(props)
 		aside = { label = "Discard copy", on_click = discard },
 		build = function()
 			return ui.column { w_full = true, gap = "$space.3",
-				composer_destination(request),
+				if request.origin == "" then ui.column { w_full = true, gap = "$space.1",
+					Text { "Local destination", style = "caption", tone = "secondary" },
+					Text { if composer_target:peek().project then composer_target:peek().cwd else "No project (local)", wrap = true },
+				} else composer_destination(request),
 				Text { "Run requested. Check Run details before trying another run. This copy can’t be started again.", tone = "secondary", wrap = true },
 				ui.scroll { w_full = true, max_h = 180,
 					ui.column { w_full = true, gap = "$space.2", selectable = true,
@@ -329,64 +429,70 @@ end)
 
 zeron.place { at = "#chat-composer >> #dictation-microphone", before = function()
 	local placed_route = zeron.live("route")
+	local placed_session = zeron.live("session")
 	composer_placement_id += 1
-	local owner = composer_placement_id
-	local draft
+	local placement = composer_placement_id
+	local function location()
+		local here = composer_location(placed_route())
+		if here == nil or here ~= composer_location(window_route:get()) then return nil end
+		local session = placed_session()
+		return if session and session.id ~= here then nil else here
+	end
+	local function release()
+		local binding = composer_binding:peek()
+		if binding and binding.placement == placement then composer_binding:set(nil) end
+	end
+	ui.on_cleanup(release)
 	ui.effect(function()
-		local route, active = placed_route(), window_route:get()
-		draft = if route and route.name == "session" and active and active.name == "session" and route.session == active.session then zeron.draft() else nil
-		if composer_owner:peek() == owner and (not active or active.name ~= "session" or active.session ~= composer_host:peek()) then composer_owner:set(0) end
+		local here = location()
+		if here ~= nil then zeron.draft() end
+		local binding = composer_binding:peek()
+		if binding and binding.host ~= here then release() end
 	end)
-	return ui.show(function()
-		local route = placed_route()
-		return route and (route.name == "session" or route.name == "home")
-	end, ui.div { pointer_events = "auto",
+	return ui.show(function() return location() ~= nil end, ui.div { pointer_events = "auto",
 		Button { id = "orchestrator-builder-composer-action", tone = "ghost", shape = "pill", size = "sm", icon = true, tooltip = "Orchestrator Builder",
 			label = function() return if composer_request:get() then "Orchestrator Builder: Review copy" else "Orchestrator Builder: Run team" end,
 			on_click = function()
-				local route, active = placed_route(), window_route:peek()
-				local id = route and route.session
-				if not route or route.name ~= "session" or type(id) ~= "string" or not string.find(id, "%S")
-					or not active or active.name ~= "session" or active.session ~= id then
-					zeron.toast("Open an existing chat on this device to run a team"); return
+				local id = location()
+				if id == nil then return end
+				local destination, title, context
+				if id ~= "" then
+					local session, projects = zeron.sessions()[id], zeron.projects()
+					destination = destination_of(session, projects)
+					if not destination or destination.device ~= changes.local_device(zeron) then
+						zeron.toast("Chat location is unavailable. Open a chat on this device"); return
+					end
+					title, context = composer_destination_details(session, destination, projects)
 				end
-				local session, projects = zeron.sessions()[id], zeron.projects()
-				local destination = destination_of(session, projects)
-				if not destination or destination.device ~= changes.local_device(zeron) then
-					zeron.toast("Chat location is unavailable. Open an existing chat on this device"); return
-				end
-				if composer_request:peek() then
-					ui.batch(function()
-						composer_host:set(id)
-						composer_owner:set(owner)
-					end)
-					return
-				end
-				local snapshot = draft
-				if not snapshot or snapshot.session ~= id or type(snapshot.attachments) ~= "table" then
-					zeron.toast("Draft is unavailable. Reopen this chat and check the plugin’s draft permission"); return
+				composer_binding_id += 1
+				local binding = { id = composer_binding_id, placement = placement, host = id }
+				if composer_request:peek() then composer_binding:set(binding); return end
+				local snapshot = zeron.draft()
+				local draft_session = snapshot and snapshot.session
+				if draft_session == nil or draft_session == ui.null then draft_session = "" end
+				if not snapshot or draft_session ~= id or type(snapshot.attachments) ~= "table" then
+					zeron.toast("Draft is unavailable. Reopen the composer and check the plugin’s draft permission"); return
 				end
 				if next(snapshot.attachments) ~= nil then zeron.toast("Remove attachments before using Run team. Only text is supported"); return end
 				if type(snapshot.text) ~= "string" or not string.find(snapshot.text, "%S") then zeron.toast("Write a task in the composer first"); return end
-				local title, context = composer_destination_details(session, destination, projects)
 				composer_request_id += 1
 				ui.batch(function()
 					composer_input.task:set(snapshot.text)
 					local library = composer_library()
 					capture_composer_team(library, library.active)
-					composer_host:set(id)
-					composer_owner:set(owner)
-					composer_request:set({ id = composer_request_id, session = id, destination = destination, title = title, context = context })
+					composer_binding:set(binding)
+					composer_request:set({ id = composer_request_id, origin = id, destination = destination, title = title, context = context })
 				end)
 			end,
 			Icon { name = "git-branch", size = 18 },
 		},
 		ui.presence(function()
-			local route, active = placed_route(), window_route:get()
-			if composer_owner:get() ~= owner or not route or route.name ~= "session" or not active or active.name ~= "session"
-				or route.session ~= active.session or route.session ~= composer_host:get() then return nil end
-			return composer_request:get()
-		end, function(request) return ComposerStart { request = request, owner = owner } end),
+			local binding = composer_binding:get()
+			return if binding and binding.placement == placement and binding.host == location() then binding else nil
+		end, function(binding)
+			local request = composer_request:peek()
+			return if request then ComposerStart { request = request, binding = binding, location = location } else nil
+		end),
 	})
 end }
 local add_options = { { value = "", label = "Add block" } }

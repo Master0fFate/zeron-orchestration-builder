@@ -14,6 +14,24 @@ local function valid_text(value, limit)
 		and not string.find(value, "%c") and utf8.len(value) ~= nil
 end
 
+function changes.valid_checkout_path(path)
+	if not valid_text(path, 4096) then return false end
+	if path == "/" or string.match(path, "^/[^/\\]") or string.match(path, "^[A-Za-z]:[/\\]") then return true end
+	if not string.match(path, "^[/\\][/\\]") then return false end
+	local unc = string.sub(string.gsub(path, "\\", "/"), 3)
+	if string.sub(unc, 1, 2) == "?/" then
+		local extended = string.sub(unc, 3)
+		if string.match(extended, "^[A-Za-z]:/") then return true end
+		unc = string.match(extended, "^[Uu][Nn][Cc]/(.+)$")
+		if not unc then return false end
+	end
+	local server, share = string.match(unc, "^([^/]+)/([^/]+)")
+	if not server or not share or string.find(server, "^%.+$") or not string.find(server, "%S")
+		or string.find(server, '[<>:"|?*]') or string.find(share, '[<>:"|?*]') then return false end
+	local share_name = string.lower((string.gsub(share, "[ .]+$", "")))
+	return share_name ~= "" and share_name ~= "pipe" and share_name ~= "mailslot" and share_name ~= "ipc$"
+end
+
 local function oid(value)
 	if type(value) == "string" and (#value == 40 or #value == 64)
 		and string.match(value, "^[0-9a-fA-F]+$") and string.find(value, "[1-9a-fA-F]") then
@@ -95,8 +113,9 @@ local function resolve(zeron, cwd, ref)
 	return revision
 end
 
-function changes.local_device(zeron)
-	for _, device in zeron.devices():peek() do
+function changes.local_device(zeron, watch)
+	local devices = zeron.devices()
+	for _, device in if watch then devices:get() else devices:peek() do
 		if device.here == true then return device.id end
 	end
 	return nil
@@ -122,7 +141,7 @@ local function read_git(zeron, destination, source)
 		error("Git sources require a session on this device")
 	end
 	local cwd = destination.cwd
-	if not valid_text(cwd, 4096) or not (string.sub(cwd, 1, 1) == "/" or string.match(cwd, "^[A-Za-z]:[/\\]")) then
+	if not changes.valid_checkout_path(cwd) then
 		error("A trusted local checkout path is required")
 	end
 	local ref = if source.kind == "commit" then source.ref else source.head

@@ -467,20 +467,24 @@ local function journal_view(zeron, open, value, selected, page, ask_page, crew_p
 	local route = block_label(root, data.node)
 	if active and active_id ~= "root" then route ..= " → " .. block_label(active, active.node) end
 	local destination = fields(data.destination)
+	local session, device, project, cwd = text(destination.session), text(destination.device), text(destination.project), text(destination.cwd)
 	local delivery_unknown = unknown_delivery(data.phase)
+	local inspect_chats = if session then "Inspect the destination session list."
+		elseif project then "Check chats in the saved project on the saved device."
+		else "Check chats without a project on the saved device."
 	local phase = if data.phase == "dispatch_not_sent" and not (active and active.refused_nonce) then "invalid refusal" else text(data.phase)
 	local function reset_pages()
 		page:set(1)
 		crew_page:set(1)
 	end
-	local invalid = value.invalid or not text(data.phase) or not text(destination.device)
-		or (destination.session ~= nil and not text(destination.session)) or (destination.project ~= nil and not text(destination.project))
+	local invalid = value.invalid or not text(data.phase) or not device
+		or (destination.session ~= nil and not session) or (destination.project ~= nil and not project)
 		or (data.chat ~= nil and not text(data.chat)) or (data.last_chat ~= nil and not text(data.last_chat))
 		or (data.nonce ~= nil and not nonce) or (delivery_unknown and not checkpoint)
 	return ui.column { w_full = true, gap = "$space.4",
 		ui.column { w_full = true, gap = "$space.2",
 			if delivery_unknown then
-				caption("Delivery unknown. Work may still execute. Do not resend. Inspect the destination session list.", "danger") else nil,
+				caption("Delivery unknown. Work may still execute. Do not resend. " .. inspect_chats, "danger") else nil,
 			Text { root.name or "Saved run", style = "heading", wrap = true, w_full = true },
 			caption("Saved run snapshot, not the editable canvas"),
 			Text { "Saved status: " .. saved_status(row, data.phase)
@@ -490,8 +494,10 @@ local function journal_view(zeron, open, value, selected, page, ask_page, crew_p
 		ui.column { w_full = true, gap = "$space.1",
 			caption("Run " .. row.id),
 			if text(data.node) then caption("Saved route: " .. route) else nil,
-			if text(destination.session) then caption("Destination session: " .. destination.session) else nil,
-			if text(destination.device) then caption("Device: " .. destination.device .. (if text(destination.project) then " · Project: " .. destination.project else "")) else nil,
+			if session then caption("Destination session: " .. session) else nil,
+			if device then caption("Device: " .. device .. (if project then " · Project: " .. project elseif destination.project == nil then " · No project" else "")) else nil,
+			if cwd then caption("Working folder: " .. cwd)
+				elseif not session and device and destination.project == nil and destination.cwd == nil then caption("Working folder: Zeron chooses a scratch folder for each role chat") else nil,
 			if text(data.last_chat) then caption("Last receipt chat: " .. data.last_chat) else nil,
 		},
 		if type(row.data) ~= "table" then caption("Saved snapshot is unreadable", "danger") else ui.column { w_full = true, gap = "$space.4",

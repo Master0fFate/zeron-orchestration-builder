@@ -420,6 +420,20 @@ validate_routes = function(team)
 	return issues
 end
 
+function M.session_requirement(team)
+	for _, node in team.nodes do
+		if node.kind == "changes" then return "Changes" end
+		if node.kind == "check" then return "Check" end
+		if node.kind == "draft" then return "Draft" end
+		if node.kind == "foreach" and (node.items == nil or node.items == "") then return "For each from changed files" end
+		if node.team then
+			local required = M.session_requirement(node.team)
+			if required then return required end
+		end
+	end
+	return nil
+end
+
 function M.validate(team)
 	local valid, err = inspect(team, false)
 	if not valid then return { { message = err } } end
