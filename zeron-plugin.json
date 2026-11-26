@@ -24,31 +24,6 @@
     "draft",
     "commands"
   ],
-  "signature": {
-    "files": {
-      "README.md": "a1a283cc1944866766a48b5dd1ea44ffeba85a1c91bdea5c3efce5225c44fedc",
-      "ZERON-LICENSE": "2c46b021915b3fd3dafc4e87b5c0ad38afb7f4e95cdd9fab1fd9e71c1f7c2a83",
-      "assets/icons/opencode-mark-dark.svg": "34d46f4672bca94c02475b436d593121e268c89bfade509d944f5cfb66c61e4b",
-      "assets/icons/provider-anthropic.svg": "f30cf334fed9baee3b1d9e9c8f1a612eab6b14b851ffd6b372c95e1f6b57187a",
-      "assets/icons/provider-deepseek.svg": "bb272aa1bd8c742ec4656da48b2b06d52b5127e4eebcc352f4a7fb0fd1b94450",
-      "assets/icons/provider-gemini.svg": "44772c084cd01ede6f5b63a890647618bd24cad7562db9479fa0f698449f5207",
-      "assets/icons/provider-openai.svg": "bfa37e1b1286be0fe23f716d1a2da7f398a6a05cf479d6f4e598e772da893eb6",
-      "assets/icons/provider-openrouter.svg": "a972fc433a9560291545a4f0f81f159e37393bede85f2992a8c9a5c56d673c54",
-      "assets/icons/provider-xai.svg": "373979a493bd40fc227d5e217f1a543a6274ef4037cb440d9d5a5f98f89d6f97",
-      "changes.luau": "9a902d055cd3f90ca13140775c387c5e938c30c56fed14cf013e7f2d52752b0c",
-      "docs/saved-team-showcase.mp4": "92dfd7a5a761eb29c9c64871567dfcaf5c741ef5dcdba4da6e6c15a41347f97e",
-      "docs/screenshot.png": "f8855de9552c4c585efc5a849cb0147e5292ccaad778c9a266bc520e80dde52c",
-      "graph.luau": "888ac36a97ac227a97581955c48cca2e06f2e8f08b6e36255de93662e88ca17a",
-      "icon.svg": "245050eaafa3a6d542bd73b001cb5f54d5f067654b3409668afb1cd9b43c7bcd",
-      "init.luau": "d86942fd343b0cd30d82b4ca0be2ddb855db1b0faab74714f579770fb2863413",
-      "presets.luau": "00fcda9dd2b7e40adb8d9eeb4362da2623089a8ed41f588e7ec320cd15af2853",
-      "run_details.luau": "f141d6a3bda233a0404a6663216f057c4489db754be26129eef421801c70d38f",
-      "runner.luau": "d9b167a9573a8f8f8bbf811e6d9d94eb267ae7cae536546c83a96ed91a1486a0",
-      "zeron.luau": "305fca67226ede401dc106dda254f47f080b7af09436d7f3e6dbdcacfbf66242"
-    },
-    "key": "VAtJsRhivZKWH6Kj50wPhYvj30hsNPfsDqyOmG0L108",
-    "sig": "f9Jdr0Qpdfn_eOzKaFMZG12cLuIPDjzus4egEfoGrTu9oYhETLSWqI0oiwN-0s6CHA31K8-lfZycjn-Hq83HCw"
-  },
   "tools": [
     {
       "description": "Submit the current orchestrator step report, optional review decision, and optional evidence-backed findings.",

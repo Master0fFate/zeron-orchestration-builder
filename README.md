@@ -2,11 +2,9 @@
 
 A visual node editor for building and running agent teams in Zeron v3.
 
-Builder is a separately installed plugin for wiring and running a workflow. Zeron’s [built-in Orchestrators (PR #1474)](https://github.com/zeronsh/zeron/pull/1474) manages tasks on an engine-backed board with crew chats and a Control Room. Builder’s Run details inspects its own local journal; it is not that board or the engine’s chat resume feature.
+Builder is a separately installed plugin for wiring and running a workflow. Run details reads its local journal; interrupted runs are not resumed automatically.
 
 ![Orchestrator Builder running in Zeron](docs/screenshot.png)
-
-[Watch the one-minute showcase](docs/saved-team-showcase.mp4). Music: [“Smash It” by Shane Ivers](https://www.silvermansound.com/free-music/smash-it), [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Trimmed, tempo-matched and faded for the video.
 
 ## Install
 
@@ -14,7 +12,15 @@ Builder is a separately installed plugin for wiring and running a workflow. Zero
 2. In Zeron, open Settings → Plugins → Install and select the file.
 3. Review and approve the requested permissions, then open Orchestrator Builder from the sidebar.
 
-The plugin requires Zeron v3 and a configured agent. No changes to Zeron or separate helper are needed. Approve the `draft` permission to use Run team from the composer. Builder copies draft text into a separate run form only when you click Run team.
+The plugin requires Zeron v3 and a configured agent. To use Run team from the composer, allow draft access. Builder observes the active draft and copies its text into a separate run form when you click Run team.
+
+### Permissions and data
+
+- `pages.add`, `ui.add`, and `navigate` add the Builder page, composer button, and Git History action, and let you open role chats. `models.read` lists available models. `files` enables file dialogs for team JSON and SVG icons.
+- `sessions.read`, `files.read`, and `devices` expose session status, checkout paths, and device information so Builder can select and check local destinations. `messages.send` starts role chats and sends follow-up prompts; `tools` exposes `submit_report`. The manifest also requests `messages.read`, which allows chat text to be read; the runner uses submitted reports rather than reading final chat replies for routing.
+- `draft` can read unsent composer text. `compose` can append review text and inline comments to an unsent draft on request. `github` reads PR data through Zeron and does not grant GitHub write access. `commands` is limited to `git`, which Builder uses to check local destinations and read selected changes.
+
+Builder stores saved teams locally and keeps run snapshots in local SQLite, including tasks, workflow instructions, destination paths, submitted reports, and Ask decisions. There is no automatic pruning or per-run delete, and abandoning a run keeps its data. Uninstalling Builder removes its local storage, not role chats or exported files. Tasks, role instructions, and relevant context are sent to the configured role agents, which may use an external model provider. Avoid putting secrets in tasks or reports. Ask gates the workflow route, not what an agent can do with its harness permissions.
 
 ## Use
 
@@ -27,7 +33,7 @@ The plugin requires Zeron v3 and a configured agent. No changes to Zeron or sepa
 - In Team, export the current team to a JSON file or import a team JSON file as a separate saved team. Plain teams use version 2, saved-team compositions use version 3, and workflows with the change-review blocks use version 4. Version 5 is reserved for teams with an Ask block. Older plugin versions that only support versions 2–4 cannot import version 5 files. Custom SVG icons and embedded team snapshots are included.
 - Open Team for the name and checks. Checks flag missing inputs and outputs, invalid routes, unreachable blocks, missing role instructions, incomplete model choices, missing Finish blocks and unbounded cycles. A manually entered model ID is not checked against the catalog.
 
-Edit teams in one Zeron window at a time. Conflict checks are best-effort: Builder can refuse a write when it sees a newer library, but separate windows can have stale copies and still overwrite each other. If a team edit is refused, **Team → Export draft JSON** exports the first conflicted draft. It stays in that window when you navigate away from Builder; later failed edits do not replace it. Export before closing or restarting the window or plugin. Reopen Builder and reapply the edits to the current team rather than overwriting newer work.
+Use Builder in one Zeron window at a time, and keep that window open for the entire run. Team-edit conflict checks are best-effort: Builder can refuse a write when it sees a newer library, but stale copies in separate windows can still overwrite each other. If a team edit is refused, **Team → Export draft JSON** exports the first conflicted draft. It stays in that window when you navigate away from Builder; later failed edits do not replace it. Export before closing or restarting the window or plugin. Reopen Builder and reapply the edits to the current team rather than overwriting newer work.
 
 New role blocks start with editable default instructions. Custom instructions replace the default; Restore default puts it back. They are task text, not a system prompt. Chief is an entry point, not an agent turn: its settings are not used for runs, and it is not linked to the active chat. The plugin does not intercept the main chat's messages.
 
@@ -119,17 +125,17 @@ If dispatch remains unresolved after pending operations settle, inspect the dest
 
 ## Development
 
-Create a development plugin folder with `zeron plugin new`, copy the source files into it, and sign with `zeron plugin sign orchestrator-builder`. Zeron must be running. In addition to running chats, Builder asks for access to session paths and device identity, Git History menus, the named `git` command, read-only GitHub data, and unsent composer drafts. It does not request GitHub write access.
+Use a dedicated development plugin folder. Keep `zeron-plugin.json` unsigned in the source checkout: this repository distributes signed release packages, not raw Git installs. Zeron signs the staged manifest and file bytes. For an unsigned development plugin, use **Sign as mine** in Settings → Plugins. Then export the reviewed plugin with `zeron plugin export <id>`. Export re-signs your own plugin and packages its installed folder, so review that folder before exporting and do not edit the package afterward.
 
 ## Limitations
 
 The canvas describes the current editable team, not live block status or evidence that a workflow has run. Questions from agents, automatic recovery and Chief inheritance are not implemented. Review roles run as agents; use Ask where the workflow needs an explicit human decision. Manual abandonment does not stop agents, cancel queued messages or resolve unknown delivery. Prior reports are passed as untrusted context.
 
-Zeron 0.3.7 may omit Pi's terminal reply; this handoff does not depend on it and requires no host patch, shell or native helper. The plugin remains subject to Zeron's loop guard. Keep Zeron open and the plugin running on this device for the entire run: without a service, tool calls and turn events are handled by the window. Closing or restarting it interrupts the run; it is not resumed or resent automatically. Remote runs are unsupported. Agent tool availability and behavior depend on the selected harness and model.
+The handoff does not depend on final chat reply text. The plugin remains subject to Zeron's loop guard. Keep Zeron open and the plugin running on this device for the entire run: tool calls and turn events are handled by the window, not a background service. Closing or restarting it interrupts the run; it is not resumed or resent automatically. Remote runs are unsupported. Agent tool availability and behavior depend on the selected harness and model.
 
 ## Design and source
 
-The experimental `orchestrator-wallpaper` Zeron v3 template in `host/zeron-template` is intended to show Zeron's own new-chat wallpaper behind the builder using the same image or wallpaper plugin and effect settings. Its wallpaper rendering has not been verified. Without that template the builder uses the normal page background. The plugin cannot detect a wallpaper, so turn the grid off manually if desired. Cards use Zeron's frosted material and its transparency preference.
+Builder uses Zeron’s page background and frosted material. It cannot detect wallpaper; turn off the grid if it makes your background harder to read.
 
 The starting team uses a simple plan, work and review sequence informed by [Anthropic's workflow guidance](https://www.anthropic.com/research/building-effective-agents) and [OpenAI's orchestration guidance](https://developers.openai.com/api/docs/guides/agents/orchestration). It is a starting diagram, not a guarantee of quality.
 
