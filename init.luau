@@ -493,7 +493,7 @@ zeron.place { at = "#chat-composer >> #dictation-microphone", before = function(
 					composer_request:set({ id = composer_request_id, origin = id, destination = destination, title = title, context = context })
 				end)
 			end,
-			Icon { name = "git-branch", size = 18 },
+			Icon { name = "users-group-rounded", size = 18 },
 		},
 		ui.presence(function()
 			local binding = composer_binding:get()
