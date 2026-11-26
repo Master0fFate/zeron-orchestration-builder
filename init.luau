@@ -153,7 +153,8 @@ local function current_destination()
 	local session = zeron.context("session")
 	if type(session) ~= "table" or type(session.id) ~= "string" or not string.find(session.id, "%S") then return "", nil end
 	local destination = destination_of(zeron.sessions()[session.id], zeron.projects())
-	return if destination then session.id, destination else "", nil
+	if destination then return session.id, destination end
+	return "", nil
 end
 
 local function saved_team_library(value, fallback)
