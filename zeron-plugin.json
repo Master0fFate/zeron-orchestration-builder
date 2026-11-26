@@ -5,7 +5,7 @@
   "description": "Build and run agent teams from reusable workflow presets.",
   "entry": "init.luau",
   "icon": "icon.svg",
-  "permissions": ["pages.add", "models.read", "files", "messages.send", "messages.read", "sessions.read", "navigate", "tools", "ui.add", "files.read", "devices", "github", "compose", "commands"],
+  "permissions": ["pages.add", "models.read", "files", "messages.send", "messages.read", "sessions.read", "navigate", "tools", "ui.add", "files.read", "devices", "github", "compose", "draft", "commands"],
   "commands": ["git"],
   "tools": [
     {

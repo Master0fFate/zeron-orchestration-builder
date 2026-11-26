@@ -17,12 +17,13 @@ local blocks = {
 	draft = { name = "Draft", version = 4 },
 	foreach = { name = "For each", version = 4, child = true },
 	collect = { name = "Collect", version = 4 },
+	ask = { name = "Ask", version = 5 },
 }
 local predicates = { docs = true, files = true, ci = true }
 local default_predicate, default_limit = "docs", 4
 
 M.options = {}
-for _, kind in { "planner", "worker", "validator", "auditor", "qa", "researcher", "changes", "check", "draft", "collect", "finish" } do
+for _, kind in { "planner", "worker", "validator", "auditor", "qa", "researcher", "changes", "check", "draft", "collect", "ask", "finish" } do
 	table.insert(M.options, { value = kind, label = (templates[kind] or blocks[kind]).name })
 end
 
@@ -75,21 +76,31 @@ local function valid_position(x, y)
 	return type(x) == "number" and type(y) == "number" and math.abs(x) <= 1000000 and math.abs(y) <= 1000000
 end
 
+function M.valid_question(question)
+	return type(question) == "string" and #question <= 512 and string.find(question, "%S") ~= nil
+		and not string.find(question, "%c") and utf8.len(question) ~= nil
+end
+
 local function inspect(value, embedded)
-	if type(value) ~= "table" or (value.version ~= 2 and (embedded or (value.version ~= 3 and value.version ~= 4))) then
-		return nil, if embedded then "Embedded teams require a version 2 team without nested blocks" else "Expected a version 2, 3 or 4 team JSON file"
+	if type(value) ~= "table" or (value.version ~= 2 and (embedded or (value.version ~= 3 and value.version ~= 4 and value.version ~= 5))) then
+		return nil, if embedded then "Embedded teams require a version 2 team without nested blocks" else "Expected a version 2, 3, 4 or 5 team JSON file"
 	end
 	if type(value.name) ~= "string" or #value.name > 256 or not string.find(value.name, "%S")
 		or type(value.nodes) ~= "table" or type(value.edges) ~= "table" then
 		return nil, "Invalid team name, blocks or connections"
 	end
-	local ids, max_id, count, chief = {}, 1, 0, false
+	local ids, max_id, count, chief, has_ask = {}, 1, 0, false, false
 	for index, node in value.nodes do
 		count += 1
 		if type(index) ~= "number" or index ~= count or count > 32 or type(node) ~= "table" then return nil, "A team must have 1–32 blocks" end
 		local id = if type(node.id) == "string" and string.match(node.id, "^[1-9]%d*$") then tonumber(node.id) else nil
 		if not id or id > 1000000000 or ids[node.id] then return nil, "Block IDs must be unique positive integers" end
 		local block = blocks[node.kind]
+		if node.kind == "ask" then
+			if embedded then return nil, "Ask can only run at the root" end
+			if not M.valid_question(node.question) then return nil, "Ask needs a single-line question (up to 512 bytes)" end
+			has_ask = true
+		end
 		if block then
 			if embedded or value.version < block.version then
 				return nil, block.name .. " blocks require a version " .. tostring(block.version) .. " or later parent"
@@ -128,6 +139,7 @@ local function inspect(value, embedded)
 		ids[node.id], max_id = node.kind, math.max(max_id, id)
 	end
 	if not chief then return nil, "A team needs one Chief with ID 1" end
+	if value.version == 5 and not has_ask then return nil, "Version 5 requires an Ask block" end
 	local edges, block_exits, edge_count = {}, {}, 0
 	for index, edge in value.edges do
 		edge_count += 1
@@ -171,6 +183,7 @@ local function snapshot(value, max_id)
 		local imported = { id = node.id, kind = node.kind, name = node.name, x = node.x, y = node.y }
 		for _, field in settings do imported[field] = node[field] or "" end
 		if node.kind == "check" then imported.predicate = node.predicate or default_predicate end
+		if node.kind == "ask" then imported.question = node.question end
 		if node.kind == "foreach" then
 			imported.limit = node.limit or default_limit
 			imported.items = node.items
@@ -230,6 +243,7 @@ function M.add(team, kind, x, y)
 	if not template or (block and block.child) or #team.nodes >= 32 or team.next_id > 1000000000 then return nil end
 	local node = { id = tostring(team.next_id), kind = kind, name = template.name, x = x, y = y, instructions = template.instructions or "", harness = "", model = "" }
 	if kind == "check" then node.predicate = default_predicate end
+	if kind == "ask" then node.question = "Continue this run?" end
 	if block then team.version = math.max(team.version, block.version) end
 	team.next_id += 1
 	table.insert(team.nodes, node)
@@ -377,6 +391,8 @@ validate_routes = function(team)
 		local routes = outgoing[node.id]
 		if node.kind == "check" then
 			if #routes ~= 2 then issue(node.id, "Connect both Check exits (pass and fail)") end
+		elseif node.kind == "ask" then
+			if #routes ~= 1 then issue(node.id, "Connect one Always output") end
 		elseif node.kind ~= "finish" then
 			if #routes == 0 then
 				issue(node.id, "Connect an output")

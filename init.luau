@@ -3,6 +3,7 @@ local graph = require("./graph")
 local presets = require("./presets")
 local changes = require("./changes")
 local runner = require("./runner").create(zeron, graph)
+local RunDetails = require("./run_details")(zeron, runner)
 local Text = require("@ds/text")
 local Button = require("@ds/button")
 local TextField = require("@ds/text_field")
@@ -18,6 +19,7 @@ local kept = zeron.store("team-v2", graph.initial())
 local teams_kept = zeron.store("teams-v1", nil)
 local grid_kept = zeron.store("canvas-grid", true)
 local plugin_store = ui.shared("plugin.orchestrator-builder.store", {})
+local conflicted_team = ui.state("orchestrator-builder.conflicted-team", nil)
 local agents = {
 	{ value = "", label = "Default agent" },
 	{ value = "pi", label = "Pi" },
@@ -44,6 +46,349 @@ for _, preset in presets.list do table.insert(preset_options, { value = preset.i
 table.insert(preset_options, { value = "__blank", label = "Blank" })
 
 local commit_request = ui.state("orchestrator-builder.commit-request", nil)
+local composer_request = ui.state("orchestrator-builder.composer-request", nil)
+local composer_request_id = 0
+local composer_placement_id = 0
+local composer_owner = ui.state("orchestrator-builder.composer-owner", 0)
+local composer_host = ui.state("orchestrator-builder.composer-host", "")
+local composer_team = ui.state("orchestrator-builder.composer-team", "")
+local composer_graph = ui.state("orchestrator-builder.composer-graph", nil)
+local composer_submitted = ui.state("orchestrator-builder.composer-submitted", false)
+local window_route = ui.shared("zeron.route", { name = "home" })
+
+local function destination_of(session, projects)
+	if type(session) ~= "table" then return nil end
+	local device, project = session.device, session.project
+	if device == ui.null then device = nil end
+	if project == ui.null then project = nil end
+	if device ~= nil and (type(device) ~= "string" or not string.find(device, "%S")) then return nil end
+	if project ~= nil then
+		if type(project) ~= "string" or not string.find(project, "%S") then return nil end
+		local entry = projects[project]
+		if type(entry) ~= "table" or type(entry.device) ~= "string" or not string.find(entry.device, "%S") then return nil end
+		if device and device ~= entry.device then return nil end
+		device = entry.device
+	end
+	if not device then return nil end
+	local cwd = if type(session.cwd) == "string" and string.find(session.cwd, "%S") then session.cwd else nil
+	if not cwd and session.worktree == true then return nil end
+	if not cwd and project and type(projects[project].path) == "string" and string.find(projects[project].path, "%S") then cwd = projects[project].path end
+	return { device = device, project = project, cwd = cwd }
+end
+
+local function destination_label(id, session, destination)
+	local title = if type(session.title) == "string" and string.find(session.title, "%S") then session.title else "Untitled"
+	return title .. " · " .. id .. " · device " .. destination.device .. (if destination.project then " · project " .. destination.project else "")
+end
+
+local function run_input(state, text)
+	return {
+		task = state("task", text), session = state("session", ""),
+		kind = state("kind", "commit"), ref = state("ref", ""),
+		base = state("base", ""), head = state("head", ""), url = state("url", ""),
+	}
+end
+
+local manual_input = run_input(function(key, initial)
+	return ui.state("orchestrator-builder.run-input." .. key, initial)
+end, "")
+
+local function destination_options()
+	local options = { { value = "", label = "Select session" } }
+	local projects = zeron.projects()
+	for id, session in zeron.sessions() do
+		local destination = destination_of(session, projects)
+		if type(id) == "string" and string.find(id, "%S") and destination then
+			table.insert(options, { value = id, label = destination_label(id, session, destination) })
+		end
+	end
+	table.sort(options, function(a, b)
+		if a.value == "" then return b.value ~= "" end
+		if b.value == "" then return false end
+		return a.label < b.label
+	end)
+	return options
+end
+
+local function saved_team_library(value, fallback)
+	return if type(value) == "table" and type(value.teams) == "table" then value else { active = "1", next_id = 2, teams = { { id = "1", team = fallback } } }
+end
+
+local function same_store_value(a, b)
+	if a == b then return true end
+	if type(a) ~= "table" or type(b) ~= "table" then return false end
+	for key, value in a do
+		if not same_store_value(value, b[key]) then return false end
+	end
+	for key in b do
+		if a[key] == nil then return false end
+	end
+	return true
+end
+
+local function composer_library()
+	return saved_team_library(teams_kept:get(), kept:get())
+end
+
+local function composer_team_options()
+	local options = {}
+	local selected, reviewed = composer_team:get(), composer_graph:get()
+	local found = false
+	for _, entry in composer_library().teams do
+		local current = entry.id == selected
+		found = found or current
+		table.insert(options, { value = entry.id, label = if current and reviewed then reviewed.name else entry.team.name })
+	end
+	if reviewed and not found then table.insert(options, { value = selected, label = reviewed.name }) end
+	return options
+end
+
+local function capture_composer_team(library, id)
+	local value
+	for _, entry in library.teams do
+		if entry.id == id then value = entry.team; break end
+	end
+	ui.batch(function()
+		composer_team:set(if value then id else "")
+		composer_graph:set(value)
+	end)
+end
+
+local function change_source(input)
+	local kind = input.kind:peek()
+	if kind == "commit" then return { kind = kind, ref = input.ref:peek() } end
+	if kind == "compare" then return { kind = kind, base = input.base:peek(), head = input.head:peek() } end
+	return { kind = kind, url = input.url:peek() }
+end
+
+local function composer_destination_details(session, destination, projects)
+	local device_name = destination.device
+	for _, device in zeron.devices():peek() do
+		if device.id == destination.device then
+			device_name = device.name or device_name
+			break
+		end
+	end
+	local project = destination.project and projects[destination.project]
+	local project_name = if project then project.name or destination.project else "No project"
+	local branch = if type(session.branch) == "string" and string.find(session.branch, "%S") then " · " .. session.branch else ""
+	local title = if type(session.title) == "string" and string.find(session.title, "%S") then session.title else "Untitled"
+	return title, device_name .. " · " .. project_name .. branch
+end
+
+local function composer_destination(request)
+	return ui.column { w_full = true, gap = "$space.1",
+		Text { "Original destination", style = "caption", tone = "secondary" },
+		Text { request.title, w_full = true, truncate = true, tooltip = request.title },
+		Text { request.context, w_full = true, style = "caption", tone = "secondary", wrap = true },
+		Text { "Working folder", style = "caption", tone = "secondary" },
+		ui.column { w_full = true, selectable = true,
+			Text { request.destination.cwd or "No folder captured; Zeron chooses the working folder.",
+				w_full = true, style = if request.destination.cwd then "mono" else "caption", wrap = true },
+		},
+	}
+end
+
+local function needs_changes(value)
+	if not value then return false end
+	for _, node in value.nodes do if node.kind == "changes" then return true end end
+	return false
+end
+
+local function start_dialog(open, input, error_state, current_team, request, owner, discard)
+	local function start()
+		if not open:peek() then return end
+		if request then
+			local pending, route = composer_request:peek(), window_route:peek()
+			if not pending or pending.id ~= request.id or composer_submitted:peek() or composer_owner:peek() ~= owner
+				or not route or route.name ~= "session" or route.session ~= request.session then return end
+		end
+		local id = if request then request.session else input.session:peek()
+		local captured = if request then request.destination else input.destination
+		local destination = if id ~= "" then destination_of(zeron.sessions()[id], zeron.projects()) else nil
+		if not destination or not captured or destination.device ~= captured.device or destination.project ~= captured.project or destination.cwd ~= captured.cwd
+			or (request and destination.device ~= changes.local_device(zeron)) then
+			error_state:set(if request then "Chat location changed or is unavailable. Discard copy, then use Run team again from the intended chat." else "Select a valid destination session; reselect it if its destination changed")
+			return
+		end
+		local value = current_team()
+		if not value then error_state:set("Select an available team"); return end
+		if needs_changes(value) then
+			local source = change_source(input)
+			if (source.kind == "commit" and not string.find(source.ref, "%S")) or (source.kind == "compare" and (not string.find(source.base, "%S") or not string.find(source.head, "%S"))) or (source.kind == "pr" and not string.find(source.url, "%S")) then error_state:set("Complete the change source"); return end
+			destination.source = source
+		end
+		destination.session = id
+		local ok, reason = runner.start(graph.copy(value), input.task:peek(), destination)
+		if not ok then error_state:set(reason); return end
+		if request then
+			composer_submitted:set(true)
+		else
+			input.session:set("")
+			input.destination = nil
+		end
+		error_state:set("")
+		open:set(false)
+		if request then zeron.toast("Run requested. Track its progress in Orchestrator Builder") end
+	end
+	local function in_original_chat()
+		return composer_host:get() == request.session
+	end
+	return Dialog { open = open, title = "Start run", size = "md", cancel = "Close", tone = if request then "danger" else nil,
+		body = if request then function()
+			if not in_original_chat() then return "Return to the original chat to start this copy." end
+			local err = error_state:get()
+			return if err ~= "" then err else "Runs the saved team captured when selected. Unsaved Builder edits aren’t included."
+		end else nil,
+		aside = if request then { label = "Discard copy", on_click = discard } else nil,
+		confirm = { label = "Start", keep_open = true, on_click = start,
+			disabled = if request then function() return composer_submitted:get() or not in_original_chat() end else nil,
+		},
+		build = function()
+			return ui.column { w_full = true, gap = "$space.3",
+				if request then composer_destination(request) else nil,
+				if request then Select { value = composer_team, options = composer_team_options, label = "Saved team", w_full = true,
+					on_change = function(id) capture_composer_team(composer_library(), id) end,
+				} else nil,
+				TextArea { value = input.task, label = "Task", rows = 4, max_rows = 8, w_full = true },
+				ui.show(function() return needs_changes(current_team()) end, ui.column { w_full = true, gap = "$space.2",
+					Select { value = input.kind, label = "Change source", w_full = true, options = { { value = "commit", label = "Commit or ref" }, { value = "compare", label = "Compare refs" }, { value = "pr", label = "GitHub pull request" } } },
+					ui.show(function() return input.kind:get() == "commit" end, TextField { value = input.ref, label = "Commit or ref", w_full = true }),
+					ui.show(function() return input.kind:get() == "compare" end, ui.column { w_full = true, gap = "$space.2", TextField { value = input.base, label = "Base", w_full = true }, TextField { value = input.head, label = "Head", w_full = true } }),
+					ui.show(function() return input.kind:get() == "pr" end, TextField { value = input.url, label = "GitHub PR URL", w_full = true }),
+				}),
+				if request then nil else Select { value = input.session, options = destination_options, label = "Destination", w_full = true, on_change = function(id)
+					input.destination = if id ~= "" then destination_of(zeron.sessions()[id], zeron.projects()) else nil
+				end },
+				if request then Text { "Only draft text is copied. Quotes, other composer context, and chat history are not forwarded. Your original draft stays unsent.", style = "caption", tone = "secondary", wrap = true }
+				else ui.show(function() return #destination_options() == 1 end, Text { "No valid destination sessions available. Create a session on the intended device or project first.", style = "caption", tone = "danger", wrap = true }),
+				Text { "Roles start new chats on the selected device and project, using its working folder when available. You can’t change that folder here.", style = "caption", tone = "secondary", wrap = true },
+				if not request then ui.show(function() return error_state:get() ~= "" end, Text { function() return error_state:get() end, style = "caption", tone = "danger", wrap = true }) else nil,
+			}
+		end,
+	}
+end
+
+local composer_input = run_input(function(key, initial)
+	return ui.state("orchestrator-builder.composer-input." .. key, initial)
+end, "")
+
+local ComposerStart = ui.component(function(props)
+	local open = ui.use_state(true)
+	local error_state = ui.use_state("")
+	local request, owner = props.request, props.owner
+	local function owns_copy()
+		local pending = composer_request:peek()
+		return pending and pending.id == request.id and composer_owner:peek() == owner
+	end
+	ui.effect(function()
+		if not open:get() and owns_copy() then composer_owner:set(0) end
+	end)
+	local function discard()
+		if not owns_copy() then return end
+		ui.batch(function()
+			composer_owner:set(0)
+			composer_host:set("")
+			composer_request:set(nil)
+			composer_submitted:set(false)
+			composer_input.task:set("")
+			composer_input.kind:set("commit")
+			composer_input.ref:set("")
+			composer_input.base:set("")
+			composer_input.head:set("")
+			composer_input.url:set("")
+			composer_team:set("")
+			composer_graph:set(nil)
+		end)
+	end
+	if not composer_submitted:peek() then
+		return start_dialog(open, composer_input, error_state, function() return composer_graph:get() end, request, owner, discard)
+	end
+	local saved, source = composer_graph:peek(), change_source(composer_input)
+	local source_label = if source.kind == "commit" then source.ref elseif source.kind == "compare" then source.base .. " → " .. source.head else source.url
+	return Dialog { open = open, title = "Run copy", size = "md", cancel = "Close",
+		aside = { label = "Discard copy", on_click = discard },
+		build = function()
+			return ui.column { w_full = true, gap = "$space.3",
+				composer_destination(request),
+				Text { "Run requested. Check Run details before trying another run. This copy can’t be started again.", tone = "secondary", wrap = true },
+				ui.scroll { w_full = true, max_h = 180,
+					ui.column { w_full = true, gap = "$space.2", selectable = true,
+						Text { "Saved team", style = "caption", tone = "secondary" },
+						Text { saved.name, wrap = true },
+						Text { "Task", style = "caption", tone = "secondary" },
+						Text { composer_input.task:peek(), wrap = true },
+						if needs_changes(saved) then Text { "Change source", style = "caption", tone = "secondary" } else nil,
+						if needs_changes(saved) then Text { source_label, wrap = true } else nil,
+					},
+				},
+			}
+		end,
+	}
+end)
+
+zeron.place { at = "#chat-composer >> #dictation-microphone", before = function()
+	local placed_route = zeron.live("route")
+	composer_placement_id += 1
+	local owner = composer_placement_id
+	local draft
+	ui.effect(function()
+		local route, active = placed_route(), window_route:get()
+		draft = if route and route.name == "session" and active and active.name == "session" and route.session == active.session then zeron.draft() else nil
+		if composer_owner:peek() == owner and (not active or active.name ~= "session" or active.session ~= composer_host:peek()) then composer_owner:set(0) end
+	end)
+	return ui.show(function()
+		local route = placed_route()
+		return route and (route.name == "session" or route.name == "home")
+	end, ui.div { pointer_events = "auto",
+		Button { id = "orchestrator-builder-composer-action", tone = "ghost", shape = "pill", size = "sm", icon = true, tooltip = "Orchestrator Builder",
+			label = function() return if composer_request:get() then "Orchestrator Builder: Review copy" else "Orchestrator Builder: Run team" end,
+			on_click = function()
+				local route, active = placed_route(), window_route:peek()
+				local id = route and route.session
+				if not route or route.name ~= "session" or type(id) ~= "string" or not string.find(id, "%S")
+					or not active or active.name ~= "session" or active.session ~= id then
+					zeron.toast("Open an existing chat on this device to run a team"); return
+				end
+				local session, projects = zeron.sessions()[id], zeron.projects()
+				local destination = destination_of(session, projects)
+				if not destination or destination.device ~= changes.local_device(zeron) then
+					zeron.toast("Chat location is unavailable. Open an existing chat on this device"); return
+				end
+				if composer_request:peek() then
+					ui.batch(function()
+						composer_host:set(id)
+						composer_owner:set(owner)
+					end)
+					return
+				end
+				local snapshot = draft
+				if not snapshot or snapshot.session ~= id or type(snapshot.attachments) ~= "table" then
+					zeron.toast("Draft is unavailable. Reopen this chat and check the plugin’s draft permission"); return
+				end
+				if next(snapshot.attachments) ~= nil then zeron.toast("Remove attachments before using Run team. Only text is supported"); return end
+				if type(snapshot.text) ~= "string" or not string.find(snapshot.text, "%S") then zeron.toast("Write a task in the composer first"); return end
+				local title, context = composer_destination_details(session, destination, projects)
+				composer_request_id += 1
+				ui.batch(function()
+					composer_input.task:set(snapshot.text)
+					local library = composer_library()
+					capture_composer_team(library, library.active)
+					composer_host:set(id)
+					composer_owner:set(owner)
+					composer_request:set({ id = composer_request_id, session = id, destination = destination, title = title, context = context })
+				end)
+			end,
+			Icon { name = "git-branch", size = 18 },
+		},
+		ui.presence(function()
+			local route, active = placed_route(), window_route:get()
+			if composer_owner:get() ~= owner or not route or route.name ~= "session" or not active or active.name ~= "session"
+				or route.session ~= active.session or route.session ~= composer_host:get() then return nil end
+			return composer_request:get()
+		end, function(request) return ComposerStart { request = request, owner = owner } end),
+	})
+end }
 local add_options = { { value = "", label = "Add block" } }
 for _, option in graph.options do if option.value ~= "team" then table.insert(add_options, option) end end
 table.insert(add_options, { value = "__saved_team", label = "Saved team" })
@@ -54,14 +399,17 @@ zeron.menu { kind = "git.commit", id = "review-commit", label = "Review in Orche
 end }
 
 local Builder = ui.component(function()
-	local previous = kept:peek() or graph.initial()
-	local saved_teams = teams_kept:peek()
-	local initial_teams = if type(saved_teams) == "table" and type(saved_teams.teams) == "table" then saved_teams else { active = "1", next_id = 2, teams = { { id = "1", team = previous } } }
+	local stored = plugin_store:peek() or {}
+	local previous = stored["team-v2"] or graph.initial()
+	local initial_teams = saved_team_library(stored["teams-v1"], previous)
 	local active_initial = previous
 	for _, entry in initial_teams.teams do if entry.id == initial_teams.active then active_initial = entry.team; break end end
-	local library = ui.use_state(graph.copy(initial_teams))
+	local baseline = ui.use_state({ library = stored["teams-v1"], legacy = stored["team-v2"] })
+	local library = ui.use_state(initial_teams)
 	local active_team = ui.use_state(initial_teams.active)
 	local team = ui.use_state(graph.copy(active_initial))
+	local unsaved_team = ui.use_state(nil)
+	local save_error = ui.use_state("")
 	local add_choice = ui.use_state("")
 	local grid = ui.use_state(grid_kept:peek() ~= false)
 	local selected = ui.use_state("1")
@@ -77,21 +425,17 @@ local Builder = ui.component(function()
 	local saved_team_error = ui.use_state("")
 	local output_open = ui.use_state(false)
 	local run_open = ui.use_state(false)
+	local details_open = ui.use_state(false)
 	local recovery_open = ui.use_state(false)
-	local recovery_id = nil
-	local task_text = ui.use_state("")
-	local destination_session = ui.use_state("")
-	local source_kind = ui.use_state("commit")
-	local source_ref = ui.use_state("")
-	local source_base = ui.use_state("")
-	local source_head = ui.use_state("")
-	local source_url = ui.use_state("")
+	local recovery_result = ui.use_state(0)
+	local recovery_request, recovery_review, recovery_error = 0, nil, nil
 	local predicate = ui.use_state("docs")
+	local question = ui.use_state("")
+	local question_error = ui.use_state("")
 	local items = ui.use_state("")
 	local limit = ui.use_state("4")
 	local draft_open = ui.use_state(false)
 	local draft_used = ui.use_state(nil)
-	local selected_destination = nil
 	local run_error = ui.use_state("")
 	local edge_condition = ui.use_state("always")
 	local edge_retries = ui.use_state("")
@@ -126,17 +470,31 @@ local Builder = ui.component(function()
 	end
 
 	local function persist(next_library, value)
-		local contents = graph.copy(plugin_store:peek() or {})
+		local observed = plugin_store:peek() or {}
+		local expected = baseline:peek()
+		if not same_store_value(observed["teams-v1"], expected.library) or not same_store_value(observed["team-v2"], expected.legacy) then
+			save_error:set("Zeron reported a newer team library. Nothing was saved. Reopen Builder to load the reported version.")
+			return false, true
+		end
+		local contents = table.clone(observed)
 		contents["team-v2"] = value
 		contents["teams-v1"] = next_library
 		if #ui.json.encode(contents) > 950000 then
-			notice:set("Storage is full. Remove custom icons before saving")
+			save_error:set("Storage is full. Remove custom icons before saving")
 			return false
 		end
+		teams_kept:set(next_library)
+		if not same_store_value(teams_kept:peek(), next_library) then
+			save_error:set("Zeron could not save the team library. Check the storage error and try again.")
+			return false
+		end
+		kept:set(value)
+		local published = plugin_store:peek()
+		baseline:set({ library = next_library, legacy = published["team-v2"] })
 		library:set(next_library)
 		team:set(value)
-		teams_kept:set(next_library)
-		kept:set(value)
+		unsaved_team:set(nil)
+		save_error:set("")
 		return true
 	end
 
@@ -145,7 +503,24 @@ local Builder = ui.component(function()
 		for _, entry in next_library.teams do
 			if entry.id == next_library.active then entry.team = graph.copy(value); break end
 		end
-		return persist(next_library, value)
+		local saved, conflict = persist(next_library, value)
+		if saved then return true end
+		if conflict then
+			if conflicted_team:peek() then
+				save_error:set("Nothing was saved. Team still has the earlier conflict draft, not this attempt. Export it before trying again.")
+			else
+				conflicted_team:set(value)
+				save_error:set("Zeron reported a newer team library. Nothing was saved. Export the draft from Team, then reopen Builder to reapply your edits.")
+			end
+		else
+			unsaved_team:set(value)
+		end
+		return false
+	end
+
+	local function save_feedback()
+		return ui.show(function() return save_error:get() ~= "" end,
+			Text { function() return save_error:get() end, style = "caption", tone = "danger", wrap = true })
 	end
 
 	local function load_models(id)
@@ -175,56 +550,17 @@ local Builder = ui.component(function()
 		end)
 	end
 
-	local function destination_of(session, projects)
-		if type(session) ~= "table" then return nil end
-		local device, project = session.device, session.project
-		if device == ui.null then device = nil end
-		if project == ui.null then project = nil end
-		if device ~= nil and (type(device) ~= "string" or not string.find(device, "%S")) then return nil end
-		if project ~= nil then
-			if type(project) ~= "string" or not string.find(project, "%S") then return nil end
-			local entry = projects[project]
-			if type(entry) ~= "table" or type(entry.device) ~= "string" or not string.find(entry.device, "%S") then return nil end
-			if device and device ~= entry.device then return nil end
-			device = entry.device
-		end
-		if not device then return nil end
-		local cwd = if type(session.cwd) == "string" and string.find(session.cwd, "%S") then session.cwd else nil
-		if not cwd and project and type(projects[project].path) == "string" and string.find(projects[project].path, "%S") then cwd = projects[project].path end
-		return { device = device, project = project, cwd = cwd }
-	end
-
-	local function destination_options()
-		local options = { { value = "", label = "Select session" } }
-		local projects = zeron.projects()
-		for id, session in zeron.sessions() do
-			local destination = destination_of(session, projects)
-			if type(id) == "string" and string.find(id, "%S") and destination then
-				local title = if type(session.title) == "string" and string.find(session.title, "%S") then session.title else "Untitled"
-				local label = title .. " · " .. id .. " · device " .. destination.device
-				if destination.project then label ..= " · project " .. destination.project end
-				table.insert(options, { value = id, label = label })
-			end
-		end
-		table.sort(options, function(a, b)
-			if a.value == "" then return b.value ~= "" end
-			if b.value == "" then return false end
-			return a.label < b.label
-		end)
-		return options
-	end
-
 	ui.effect(function()
 		local request = commit_request:get()
 		if not request then return end
 		commit_request:set(nil)
-		source_kind:set("commit")
-		source_ref:set(request.sha)
+		manual_input.kind:set("commit")
+		manual_input.ref:set(request.sha)
 		run_error:set("")
 		local id = request.session or ""
 		local destination = if id ~= "" then destination_of(zeron.sessions()[id], zeron.projects()) else nil
-		destination_session:set(if destination then id else "")
-		selected_destination = destination
+		manual_input.session:set(if destination then id else "")
+		manual_input.destination = destination
 		run_open:set(true)
 	end)
 
@@ -235,6 +571,8 @@ local Builder = ui.component(function()
 		selected_edge:set(0)
 		name:set(node.name or "")
 		predicate:set(node.predicate or "docs")
+		question:set(node.question or "")
+		question_error:set("")
 		items:set(node.items or "")
 		limit:set(tostring(node.limit or 4))
 		instructions:set(node.instructions or "")
@@ -311,7 +649,7 @@ local Builder = ui.component(function()
 			saved_team_open:set(false)
 			notice:set("Team block added")
 		else
-			saved_team_error:set("Not enough storage to add this team")
+			saved_team_error:set(save_error:peek())
 		end
 	end
 
@@ -396,7 +734,7 @@ local Builder = ui.component(function()
 		next_library.next_id += 1
 		next_library.active = id
 		table.insert(next_library.teams, { id = id, team = graph.copy(value) })
-		if not persist(next_library, value) then preset_error:set("Could not save team; storage may be full"); return end
+		if not persist(next_library, value) then preset_error:set(save_error:peek()); return end
 		active_team:set(id)
 		team_name:set(value.name)
 		select_node("1")
@@ -422,7 +760,7 @@ local Builder = ui.component(function()
 				next_library.next_id += 1
 				next_library.active = id
 				table.insert(next_library.teams, { id = id, team = graph.copy(value) })
-				if not persist(next_library, value) then transfer_status:set("Not enough storage to import this team"); return end
+				if not persist(next_library, value) then return end
 				active_team:set(id)
 				team_name:set(value.name)
 				select_node("1")
@@ -433,9 +771,8 @@ local Builder = ui.component(function()
 		end, function(err) transfer_status:set("Could not choose file: " .. tostring(err)) end)
 	end
 
-	local function export_team()
+	local function export_team(value, is_conflict)
 		transfer_status:set("")
-		local value = graph.copy(team:peek())
 		local filename = string.gsub(value.name, '[<>:"/\\|%?%*%c]', "_")
 		local encoded = ui.json.encode(value, { pretty = true })
 		if #encoded > 500000 then encoded = ui.json.encode(value) end
@@ -443,7 +780,8 @@ local Builder = ui.component(function()
 		ui.save_file({ title = "Export team", name = filename .. ".json", filters = { { "JSON", { "json" } } } }):after(function(file)
 			if not file then return end
 			ui.write_file(file, encoded):after(function()
-				transfer_status:set("Team exported")
+				if is_conflict and same_store_value(conflicted_team:peek(), value) then conflicted_team:set(nil) end
+				transfer_status:set(if is_conflict then "Conflict draft exported" else "Team exported")
 			end, function(err) transfer_status:set("Could not save file: " .. tostring(err)) end)
 		end, function(err) transfer_status:set("Could not choose location: " .. tostring(err)) end)
 	end
@@ -584,10 +922,7 @@ local Builder = ui.component(function()
 			end
 			wire:set(nil)
 		elseif drag.kind == "node" then
-			if not save(team:peek()) then
-				local value = graph.copy(library:peek())
-				for _, entry in value.teams do if entry.id == value.active then team:set(entry.team); break end end
-			end
+			save(team:peek())
 		end
 		drag = nil
 	end
@@ -674,7 +1009,7 @@ local Builder = ui.component(function()
 				c:text(fit_text(detail, 172 * z, 11 * z), x + 36 * z, y + 51 * z, { size = 11 * z, color = "$text.secondary", baseline = "middle" })
 				c:rect(x + 12 * z, y + 70 * z, (width - 24) * z, 32 * z, "$zeron.secondary.bg", 6 * z)
 				c:circle(x + 24 * z, y + 86 * z, 3 * z, "$text.tertiary")
-				c:text(if node.kind == "chief" then "Entry point" elseif node.kind == "team" or node.kind == "foreach" then "Saved team snapshot" elseif node.kind == "changes" then "Change set" elseif node.kind == "check" then "Check: " .. (node.predicate or "docs") elseif node.kind == "collect" then "Collect results" elseif node.kind == "draft" then "Draft review" else "Configured role", x + 34 * z, y + 86 * z, { size = 11 * z, color = "$text.secondary", baseline = "middle" })
+				c:text(if node.kind == "chief" then "Entry point" elseif node.kind == "team" or node.kind == "foreach" then "Saved team snapshot" elseif node.kind == "changes" then "Change set" elseif node.kind == "check" then "Check: " .. (node.predicate or "docs") elseif node.kind == "collect" then "Collect results" elseif node.kind == "draft" then "Draft review" elseif node.kind == "ask" then "Human decision" else "Configured role", x + 34 * z, y + 86 * z, { size = 11 * z, color = "$text.secondary", baseline = "middle" })
 			else
 				c:text("End of team", x + 16 * z, y + 52 * z, { size = 11 * z, color = "$text.secondary", baseline = "middle" })
 			end
@@ -772,6 +1107,11 @@ local Builder = ui.component(function()
 		if not node then return end
 		node.name = name:peek()
 		if node.kind == "check" then node.predicate = predicate:peek() end
+		if node.kind == "ask" then
+			local value = question:peek()
+			if not graph.valid_question(value) then question_error:set("Enter a single-line question (up to 512 bytes)"); return end
+			node.question = value
+		end
 		if node.kind == "foreach" then node.items = if items:peek() ~= "" then items:peek() else nil; node.limit = tonumber(limit:peek()) or 4 end
 		if node.kind ~= "team" and node.kind ~= "foreach" then
 			node.instructions, node.harness, node.provider, node.model = instructions:peek(), harness:peek(), model_provider:peek(), model:peek()
@@ -794,10 +1134,10 @@ local Builder = ui.component(function()
 				for i = 1, 10 do table.insert(retry_options, { value = tostring(i), label = tostring(i) }) end
 				return ui.column { w_full = true, gap = "$space.3",
 					Text { (if from then from.name else edge.from) .. " → " .. (if to then to.name else edge.to), tone = "secondary", wrap = true },
-					Select { value = edge_condition, label = "Condition", w_full = true, options = {
+					if from and from.kind == "ask" then Text { "Always", tone = "secondary" } else Select { value = edge_condition, label = "Condition", w_full = true, options = {
 						{ value = "always", label = "Always" }, { value = "pass", label = if from and from.kind == "check" then "Yes" else "Pass" }, { value = "fail", label = if from and from.kind == "check" then "No" else "Fail" },
 					} },
-					ui.show(function() return edge_condition:get() == "fail" and (not from or from.kind ~= "check") end, ui.column { w_full = true, gap = "$space.2",
+					ui.show(function() return edge_condition:get() == "fail" and (not from or (from.kind ~= "check" and from.kind ~= "ask")) end, ui.column { w_full = true, gap = "$space.2",
 						Select { value = edge_retries, label = "Retry limit", options = retry_options, w_full = true },
 						Text { "Required on failure returns. Limit applies to the whole run.", style = "caption", tone = "secondary", wrap = true },
 					}),
@@ -813,6 +1153,13 @@ local Builder = ui.component(function()
 			return ui.column { gap = "$space.2", Text { "Settings", style = "heading" }, Text { "Select a block or connection", tone = "secondary", wrap = true } }
 		end
 		local fields = { TextField { value = name, label = "Name", w_full = true } }
+		if node.kind == "ask" then
+			table.insert(fields, TextField { value = question, label = "Question", w_full = true,
+				error = function()
+					return if question_error:get() ~= "" and not graph.valid_question(question:get()) then question_error:get() else ""
+				end,
+			})
+		end
 		if node.kind == "team" or node.kind == "foreach" then
 			local names = {}
 			for _, child in node.team.nodes do if child.kind ~= "chief" and child.kind ~= "finish" then table.insert(names, child.name) end end
@@ -886,13 +1233,135 @@ local Builder = ui.component(function()
 		return ui.column { w_full = true, gap = "$space.2", table.unpack(rows) }
 	end
 
+	local function review_run()
+		if recovery_open:peek() then return end
+		local id = runner.state:peek().run_id
+		recovery_request += 1
+		local request = recovery_request
+		recovery_review, recovery_error = nil, nil
+		recovery_result:set(0)
+		run_error:set("")
+		recovery_open:set(true)
+		local function selected()
+			return recovery_request == request and recovery_open:peek()
+		end
+		ui.task(function()
+			if not selected() then return end
+			local ok, review, reason = pcall(runner.review_abandonment, id, selected)
+			if not selected() then return end
+			recovery_review = if ok then review else nil
+			recovery_error = if ok then reason else "Could not read the active run"
+			recovery_result:set(request)
+		end)
+	end
+
+	local function recovery_controls()
+		local review, reason, request = recovery_review, recovery_error, recovery_result:peek()
+		if not review then
+			return Text { reason or "Reading checkpoint…", tone = if reason then "danger" else "secondary", wrap = true }
+		end
+		local function reviewing()
+			return recovery_open:peek() and recovery_request == request and recovery_result:peek() == request
+		end
+		local data = review.data
+		local frame, snapshot_team = data, data.graph
+		if data.active_frame and data.active_frame ~= "root" then
+			frame = data.children[#data.children]
+			snapshot_team = graph.node(data.graph, frame.parent_node).team
+		end
+		local node = graph.node(snapshot_team, frame.node)
+		local block = if type(node.name) == "string" and node.name ~= "" then node.name else frame.node
+		local visit = if data.nonce then frame.visits[#frame.visits] else nil
+		local chat = if visit then data.chat or visit.chat else nil
+		local rows = {
+			Text { "Run: " .. review.id .. " · " .. review.status, style = "caption", tone = "secondary", wrap = true },
+			Text { "Checkpoint: " .. data.phase, style = "heading", wrap = true },
+			Text { "Block: " .. (if frame == data then "" else data.active_frame .. " / ") .. block, wrap = true },
+			if review.reason ~= "" then Text { review.reason, tone = "secondary", wrap = true } else nil,
+		}
+		if chat then table.insert(rows, Text { "Step chat: " .. chat, wrap = true }) end
+		if data.last_chat and data.last_chat ~= chat then table.insert(rows, Text { "Last chat: " .. data.last_chat, wrap = true }) end
+		if visit then
+			local receipt = visit.receipt
+			local evidence = if receipt then (if receipt.delivery == "queue" then "Queued receipt: " else "Dispatch receipt: ") .. receipt.id else "Dispatch not sent"
+			table.insert(rows, Text { evidence, wrap = true })
+		end
+		local chats, receipts = {}, {}
+		local function collect(saved)
+			for _, step in ipairs(saved.visits) do
+				local receipt = step.receipt
+				if receipt then
+					if not receipts[receipt.chat] then table.insert(chats, receipt.chat) end
+					receipts[receipt.chat] = receipt
+				end
+			end
+		end
+		collect(data)
+		for _, child in ipairs(data.children or {}) do collect(child) end
+		if #chats > 0 then table.insert(rows, Text { "Saved chats", style = "heading" }) end
+		for _, id in ipairs(chats) do
+			local receipt = receipts[id]
+			local label = if receipt.delivery == "queue" then "Queued receipt: " else "Saved receipt: "
+			table.insert(rows, ui.row { w_full = true, gap = "$space.2", items = "center",
+				ui.column { grow = 1, min_w = 0,
+					Text { id, wrap = true, w_full = true },
+					Text { label .. receipt.id, style = "caption", tone = "secondary", wrap = true, w_full = true },
+				},
+				Button { "Open chat", size = "sm", tone = "secondary", on_click = function()
+					if reviewing() then zeron.open({ session = id }) end
+				end },
+			})
+		end
+		return ui.column { w_full = true, gap = "$space.3",
+			ui.scroll { w_full = true, max_h = 260, ui.column { w_full = true, gap = "$space.2", table.unpack(rows) } },
+			ui.row { w_full = true, justify = "end",
+				Button { "Abandon run", tone = "danger", disabled = function() return not runner.state:get().can_abandon end, on_click = function()
+					if not reviewing() then return end
+					recovery_result:set(0)
+					recovery_review = nil
+					recovery_open:set(false)
+					local ok, why = runner.abandon(true, review)
+					run_error:set(if ok then "" else why)
+				end },
+			},
+		}
+	end
+
+	local function active_ask()
+		local ask = runner.state:get().ask
+		return ask and ask.id or ""
+	end
+
+	local function ask_controls()
+		local ask = runner.state:peek().ask
+		if not ask then return ui.div {} end
+		local function decide(decision)
+			local ok, reason = runner.decide_ask(ask.id, decision)
+			run_error:set(if ok then "" else reason)
+		end
+		return ui.column { w_full = true, gap = "$space.2", pt = "$space.3", pb = "$space.2",
+			ui.div { w_full = true, h = 1, bg = "$border.subtle" },
+			Text { "Decision required", style = "heading" },
+			ui.scroll { w_full = true, max_h = 96,
+				Text { ask.question, wrap = true, w_full = true },
+			},
+			ui.row { w_full = true, items = "center", justify = "end", flex_wrap = true, gap = "$space.2",
+				Button { "Stop run", tone = "secondary", size = "sm", on_click = function() decide("stop") end },
+				Button { "Continue run", size = "sm", on_click = function() decide("continue") end },
+			},
+		}
+	end
+
 	return ui.column { w_full = true, h_full = true, p = "$space.4", gap = "$space.3",
 		ui.row { w_full = true, items = "center", gap = "$space.2",
-			Text { "Orchestrator Builder", style = "caption", tone = "secondary" },
+			Text { "Editable team", style = "caption", tone = "secondary" },
 			Text { function() return team:get().name end, style = "heading", max_w = 360, min_w = 0, shrink = 1, truncate = true },
 			IconButton { icon = "pen", label = "Edit team", size = "sm", on_click = function() team_open:set(true) end },
 			ui.div { grow = 1 },
-			Text { function() return "Run: " .. runner.state:get().status end, style = "caption", tone = "secondary" },
+			Text { function()
+				local status = runner.state:get().status
+				return "Run: " .. (if status == "saving_ask" then "saving" elseif status == "asking" then "waiting" else status)
+			end, style = "caption", tone = "secondary" },
 		},
 		ui.row { w_full = true, gap = "$space.2", items = "center",
 			Select { value = add_choice, options = add_options, size = "sm", w = 144, name = "Add block", on_change = function(kind)
@@ -912,34 +1381,47 @@ local Builder = ui.component(function()
 			Button { "Fit", tone = "secondary", size = "sm", on_click = fit },
 		},
 		ui.column { w_full = true, gap = "$space.2",
-			ui.row { w_full = true, items = "center", gap = "$space.2",
-				Button { "Start", size = "sm", disabled = function() local status = runner.state:get().status; return status ~= "idle" and status ~= "finished" end, on_click = function() run_error:set(""); destination_session:set(""); selected_destination = nil; run_open:set(true) end },
+			ui.row { w_full = true, items = "center", gap = "$space.2", flex_wrap = true,
+				Button { "Start", size = "sm", disabled = function() local status = runner.state:get().status; return status ~= "idle" and status ~= "finished" and status ~= "stopped" end, on_click = function()
+					run_error:set("")
+					manual_input.session:set("")
+					manual_input.destination = nil
+					run_open:set(true)
+				end },
 				Button { "Review draft", tone = "secondary", size = "sm", disabled = function() return runner.state:get().draft == nil end, on_click = function() run_error:set(""); draft_open:set(true) end },
 				Button { "Team output", tone = "secondary", size = "sm", disabled = function() return runner.state:get().handoff == nil end, on_click = function() output_open:set(true) end },
 				Button { "Open chat", tone = "secondary", size = "sm", disabled = function() return runner.state:get().chat == nil end, on_click = function()
 					local ok, reason = runner.open_chat()
 					if not ok then run_error:set(reason) end
 				end },
-				Button { "Stop", tone = "secondary", size = "sm", disabled = function() local status = runner.state:get().status; return status ~= "starting" and status ~= "running" end, on_click = function()
+				ui.show(function()
+					local status = runner.state:get().status
+					return status ~= "asking" and status ~= "saving_ask"
+				end, Button { "Stop", tone = "secondary", size = "sm", disabled = function() local status = runner.state:get().status; return status ~= "starting" and status ~= "running" end, on_click = function()
 					local ok, reason = runner.stop()
 					if not ok then run_error:set(reason) end
-				end },
+				end }),
 				ui.show(function() local status = runner.state:get().status; return status == "blocked" or status == "interrupted" end,
-					Button { "Review / abandon", tone = "secondary", size = "sm", on_click = function()
-						recovery_id = runner.state:peek().run_id
-						run_error:set("")
-						recovery_open:set(true)
-					end }),
-				Text { function() local route = runner.state:get().route; return if route then "Route block ID: " .. tostring(route) else "" end, style = "caption", tone = "secondary" },
+					Button { "Review run", tone = "secondary", size = "sm", on_click = review_run }),
+				Button { "Run details", tone = "secondary", size = "sm", disabled = function() return runner.state:get().status == "loading" end,
+					on_click = function() details_open:set(true) end },
 			},
-			Text { function() return runner.state:get().reason or "" end, style = "caption", tone = "secondary", wrap = true },
+			Text { function()
+				local state = runner.state:get()
+				return if state.ask then "" else state.reason or ""
+			end, style = "caption", tone = "secondary", wrap = true },
+			ui.show(function() return runner.state:get().status == "saving_ask" end,
+				Text { "Stop is unavailable during this save. A timeout blocks the run; it does not cancel the write.", style = "caption", tone = "secondary", wrap = true }),
+			ui.presence(active_ask, ask_controls, { w_full = true }),
 			ui.show(function() local status = runner.state:get().status; return status == "blocked" or status == "interrupted" end,
 				Text { function()
 					local state = runner.state:get()
 					if state.abandoning then return "Abandonment pending" end
-					if state.pending_chat then return "Chat creation pending" end
+					if state.pending_chat then return "Chat dispatch pending" end
 					if state.pending_receipt then return "Saving chat receipt" end
 					if state.pending_claim then return "Journal claim pending" end
+					if state.pending_commit then return "Completion commit pending" end
+					if state.pending_report then return "Saving report" end
 					if not state.can_abandon then return "Review journal manually" end
 					return "Review required"
 				end, style = "caption", tone = "danger", wrap = true }),
@@ -958,7 +1440,12 @@ local Builder = ui.component(function()
 				},
 			},
 		},
-		Text { function() return notice:get() end, style = "caption", tone = "secondary", wrap = true },
+		Text { function()
+			local err = save_error:get()
+			if err ~= "" then return err end
+			if conflicted_team:get() then return "A conflict draft is available to export from Team." end
+			return notice:get()
+		end, style = "caption", tone = "secondary", wrap = true },
 		Dialog { open = saved_team_open, title = "Saved team", size = "md", cancel = "Cancel",
 			confirm = { label = "Add block", on_click = add_saved_team },
 			build = function()
@@ -994,44 +1481,7 @@ local Builder = ui.component(function()
 				return ui.scroll { w_full = true, h = 320, ui.column { w_full = true, gap = "$space.3", table.unpack(rows) } }
 			end,
 		},
-		Dialog { open = run_open, title = "Start run", size = "md", cancel = "Close",
-			confirm = { label = "Start", on_click = function()
-				local id = destination_session:peek()
-				local destination = if id ~= "" then destination_of(zeron.sessions()[id], zeron.projects()) else nil
-				if not destination or not selected_destination or destination.device ~= selected_destination.device or destination.project ~= selected_destination.project or destination.cwd ~= selected_destination.cwd then
-					run_error:set("Select a valid destination session; reselect it if its destination changed")
-					return
-				end
-				local source = if source_kind:peek() == "commit" then { kind = "commit", ref = source_ref:peek() } elseif source_kind:peek() == "compare" then { kind = "compare", base = source_base:peek(), head = source_head:peek() } else { kind = "pr", url = source_url:peek() }
-				local needs_change = false
-				for _, node in team:peek().nodes do if node.kind == "changes" then needs_change = true; break end end
-				if needs_change and ((source.kind == "commit" and not string.find(source.ref, "%S")) or (source.kind == "compare" and (not string.find(source.base, "%S") or not string.find(source.head, "%S"))) or (source.kind == "pr" and not string.find(source.url, "%S"))) then run_error:set("Complete the change source"); return end
-				destination.session = id
-				destination.source = if needs_change then source else nil
-				local ok, reason = runner.start(graph.copy(team:peek()), task_text:peek(), destination)
-				if ok then run_error:set(""); run_open:set(false) else run_error:set(reason) end
-			end },
-			build = function()
-				return ui.column { w_full = true, gap = "$space.3",
-					TextArea { value = task_text, label = "Task", rows = 4, max_rows = 8, w_full = true },
-					ui.show(function()
-						for _, node in team:get().nodes do if node.kind == "changes" then return true end end
-						return false
-					end, ui.column { w_full = true, gap = "$space.2",
-						Select { value = source_kind, label = "Change source", w_full = true, options = { { value = "commit", label = "Commit or ref" }, { value = "compare", label = "Compare refs" }, { value = "pr", label = "GitHub pull request" } } },
-						ui.show(function() return source_kind:get() == "commit" end, TextField { value = source_ref, label = "Commit or ref", w_full = true }),
-						ui.show(function() return source_kind:get() == "compare" end, ui.column { w_full = true, gap = "$space.2", TextField { value = source_base, label = "Base", w_full = true }, TextField { value = source_head, label = "Head", w_full = true } }),
-						ui.show(function() return source_kind:get() == "pr" end, TextField { value = source_url, label = "GitHub PR URL", w_full = true }),
-					}),
-					Select { value = destination_session, options = destination_options, label = "Destination", w_full = true, on_change = function(id)
-						selected_destination = if id ~= "" then destination_of(zeron.sessions()[id], zeron.projects()) else nil
-					end },
-					ui.show(function() return #destination_options() == 1 end, Text { "No valid destination sessions available. Create a session on the intended device or project first.", style = "caption", tone = "danger", wrap = true }),
-					Text { "Roles start new chats on the selected session’s device and project. The change source and destination are copied at start; the destination workspace is not editable here.", style = "caption", tone = "secondary", wrap = true },
-					ui.show(function() return run_error:get() ~= "" end, Text { function() return run_error:get() end, style = "caption", tone = "danger", wrap = true }),
-				}
-			end,
-		},
+		start_dialog(run_open, manual_input, run_error, function() return team:get() end),
 		Dialog { open = draft_open, title = "Review draft", size = "md", cancel = "Close",
 			confirm = { label = "Append to composer", on_click = function()
 				local draft = runner.state:peek().draft
@@ -1061,21 +1511,17 @@ local Builder = ui.component(function()
 				return ui.scroll { w_full = true, h = 320, ui.column { w_full = true, gap = "$space.3", table.unpack(rows) } }
 			end,
 		},
-		Dialog { open = recovery_open, title = "Review / abandon", size = "md", cancel = "Cancel",
-			confirm = { label = "Abandon run", on_click = function()
-				local state = runner.state:peek()
-				if state.run_id ~= recovery_id or (state.status ~= "blocked" and state.status ~= "interrupted") then
-					run_error:set("Run changed. Close and review the current run.")
-					return
-				end
-				local ok, reason = runner.abandon(true)
-				if ok then run_error:set(""); recovery_open:set(false) else run_error:set(reason) end
+		RunDetails { open = details_open },
+		Dialog { open = recovery_open, title = "Review run", size = "md", tone = "danger", cancel = "Cancel",
+			aside = { label = "Run details", on_click = function()
+				recovery_open:set(false)
+				details_open:set(true)
 			end },
 			build = function()
 				return ui.column { w_full = true, gap = "$space.3",
-					Text { "Abandoning does not stop agents or queued messages. Inspect the chat and stop any pending work first. Open chat may show an earlier block or be unavailable.", tone = "danger", wrap = true },
-					Text { "This only requests journal abandonment. It does not retry the run automatically.", tone = "secondary", wrap = true },
-					ui.show(function() return run_error:get() ~= "" end, Text { function() return run_error:get() end, style = "caption", tone = "danger", wrap = true }),
+					Text { "Stop the originating runner first. Inspect the saved chats and stop any in-flight agents or queued messages before abandoning.", tone = "danger", wrap = true },
+					Text { "Abandoning releases the journal lock. It does not cancel work or resend messages.", tone = "secondary", wrap = true },
+					ui.presence(function() return recovery_result:get() end, recovery_controls, { w_full = true }),
 				}
 			end,
 		},
@@ -1085,8 +1531,8 @@ local Builder = ui.component(function()
 					local value = graph.copy(team:peek())
 					local edge = value.edges[selected_edge:peek()]
 					if not edge then return end
-					edge.condition = edge_condition:peek()
 					local from = graph.node(value, edge.from)
+					edge.condition = if from and from.kind == "ask" then "always" else edge_condition:peek()
 					edge.max_retries = if edge.condition == "fail" and (not from or from.kind ~= "check") then tonumber(edge_retries:peek()) else nil
 					if save(value) then edit_open:set(false); notice:set("Connection saved") end
 				else
@@ -1095,7 +1541,10 @@ local Builder = ui.component(function()
 			end },
 			build = function()
 				return ui.scroll { w_full = true, h = if selected_edge:peek() > 0 then 300 else 420,
-					ui.presence(function() return selected:get() .. ":" .. tostring(selected_edge:get()) end, inspector, { w_full = true }),
+					ui.column { w_full = true, gap = "$space.3",
+						save_feedback(),
+						ui.presence(function() return selected:get() .. ":" .. tostring(selected_edge:get()) end, inspector, { w_full = true }),
+					},
 				}
 			end,
 		},
@@ -1112,9 +1561,19 @@ local Builder = ui.component(function()
 			end,
 		},
 		Dialog { open = team_open, title = "Team", size = "md", cancel = "Close",
+			body = "Edit teams in one Zeron window at a time. Conflict checks are best-effort and cannot protect saves across separate windows.",
 			build = function()
 				return ui.scroll { w_full = true, h = 320,
 					ui.column { w_full = true, gap = "$space.4",
+						ui.show(function() return conflicted_team:get() ~= nil end, ui.column { w_full = true, gap = "$space.2", items = "start",
+							Text { "A draft from a refused save is still in this window. Export it before closing Zeron.", style = "caption", tone = "danger", wrap = true },
+							Button { "Export draft JSON", tone = "secondary", size = "sm", on_click = function()
+								local draft = conflicted_team:peek()
+								if draft then export_team(draft, true) end
+							end },
+						}),
+						save_feedback(),
+						Text { function() return transfer_status:get() end, style = "caption", tone = "secondary" },
 						Select { value = active_team, options = team_options, label = "Teams", w_full = true, on_change = open_team },
 						TextField { value = team_name, label = "Team name", w_full = true },
 						ui.row { gap = "$space.2",
@@ -1128,9 +1587,10 @@ local Builder = ui.component(function()
 						},
 						ui.row { gap = "$space.2",
 							Button { "Import JSON", tone = "secondary", size = "sm", on_click = import_team },
-							Button { "Export JSON", tone = "secondary", size = "sm", on_click = export_team },
+							Button { function() return if unsaved_team:get() then "Export unsaved JSON" else "Export JSON" end, tone = "secondary", size = "sm", on_click = function()
+								export_team(unsaved_team:peek() or team:peek())
+							end },
 						},
-						Text { function() return transfer_status:get() end, style = "caption", tone = "secondary" },
 						Text { "Team checks", style = "heading" },
 						ui.presence(function() return team:get() end, checks, { w_full = true }),
 					},

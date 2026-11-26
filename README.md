@@ -2,6 +2,8 @@
 
 A visual node editor for building and running agent teams in Zeron v3.
 
+Builder is a separately installed plugin for wiring and running a workflow. Zeron’s [built-in Orchestrators (PR #1474)](https://github.com/zeronsh/zeron/pull/1474) manages tasks on an engine-backed board with crew chats and a Control Room. Builder’s Run details inspects its own local journal; it is not that board or the engine’s chat resume feature.
+
 ![Orchestrator Builder running in Zeron](docs/screenshot.png)
 
 [Watch the one-minute showcase](docs/saved-team-showcase.mp4). Music: [“Smash It” by Shane Ivers](https://www.silvermansound.com/free-music/smash-it), [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Trimmed, tempo-matched and faded for the video.
@@ -12,7 +14,7 @@ A visual node editor for building and running agent teams in Zeron v3.
 2. In Zeron, open Settings → Plugins → Install and select the file.
 3. Review and approve the requested permissions, then open Orchestrator Builder from the sidebar.
 
-The plugin requires Zeron v3 and a configured agent. No changes to Zeron or separate helper are needed.
+The plugin requires Zeron v3 and a configured agent. No changes to Zeron or separate helper are needed. Approve the `draft` permission to use Run team from the composer. While the action is mounted in an existing chat, Builder reads the current draft as it changes. It copies the text into a separate run form only when you click Run team.
 
 ## Use
 
@@ -22,8 +24,10 @@ The plugin requires Zeron v3 and a configured agent. No changes to Zeron or sepa
 - Select a block's settings icon to edit its name, icon, runtime, provider, model and role instructions. Choose Other agent to enter a custom runtime ID. Save the block to apply the edits.
 - Custom icons are self-contained SVG files up to 16 KB. Zeron stores their contents with the team in the plugin's own storage; they are not separate files in the signed plugin folder.
 - The team name is shown in the header and can be changed through its edit control. Open Team to create a new team or switch between saved teams. Names, positions, settings and connections are saved locally.
-- In Team, export the current team to a JSON file or import a team JSON file as a separate saved team. Plain teams use version 2, saved-team compositions use version 3, and workflows with the change-review blocks use version 4. Custom SVG icons and embedded team snapshots are included.
+- In Team, export the current team to a JSON file or import a team JSON file as a separate saved team. Plain teams use version 2, saved-team compositions use version 3, and workflows with the change-review blocks use version 4. Version 5 is reserved for teams with an Ask block. Older plugin versions that only support versions 2–4 cannot import version 5 files. Custom SVG icons and embedded team snapshots are included.
 - Open Team for the name and checks. Checks flag missing inputs and outputs, invalid routes, unreachable blocks, missing role instructions, incomplete model choices, missing Finish blocks and unbounded cycles. A manually entered model ID is not checked against the catalog.
+
+Edit teams in one Zeron window at a time. Conflict checks are best-effort: Builder can refuse a write when it sees a newer library, but separate windows can have stale copies and still overwrite each other. If a team edit is refused, **Team → Export draft JSON** exports the first conflicted draft. It stays in that window when you navigate away from Builder; later failed edits do not replace it. Export before closing or restarting the window or plugin. Reopen Builder and reapply the edits to the current team rather than overwriting newer work.
 
 New role blocks start with editable default instructions. Custom instructions replace the default; Restore default puts it back. They are task text, not a system prompt. Chief is an entry point, not an agent turn: its settings are not used for runs, and it is not linked to the active chat. The plugin does not intercept the main chat's messages.
 
@@ -34,11 +38,12 @@ New role blocks start with editable default instructions. Custom instructions re
 | Plan, build, review | Turn a brief into a plan, implement it, and get a separate review. |
 | Plan only | Get ordered steps and acceptance criteria without changing anything. |
 | Research & compare | Gather evidence, compare options, and make a recommendation. |
+| Research & approve | Review a local change proposal and choose whether to start implementation, then get a separate review. |
 | Review & revise | Draft, review, and send concrete issues back to the writer for up to two revisions. |
 | Review a change | Review a Git change by folder and prepare an unsent draft. Requires a change source and a checkout that can read its diff. |
 | Blank | Start with Chief and wire your own workflow. |
 
-Each preset is an editable copy with no model pinned. Pick a destination with a configured default agent or choose a runtime and model for each role. The four general presets do not need a Git change source.
+Each preset is an editable copy with no model pinned. Pick a destination with a configured default agent or choose a runtime and model for each role. Only Review a change needs a Git change source.
 
 ## Reuse a saved team
 
@@ -59,9 +64,15 @@ When the run reaches a team block, its roles get the original task and run in th
 
 ## Run a team
 
-Select Start, enter a task, select an existing session on this device under Destination and confirm. The session supplies its device and, when present, project; check the IDs in the selection before starting. Remote destinations are unsupported: they may start a chat but cannot be relied on to deliver the tool call or terminal events to this runner. Local Git and composer actions require a destination on this device. The selected session is not sent messages. If no valid local session is available, create one on this device first. The runner validates the destination and team before claiming the journal, and snapshots both for the run; later edits, team switches or session changes do not change it. The destination is stored in the run journal, including for interrupted runs. Acceptance starts asynchronous journal setup, not a guarantee that a chat was sent. The status and reason show progress or failure, and the route is a block ID in the run snapshot, not necessarily the team currently displayed.
+Select Start, enter a task, select an existing session on this device under Destination and confirm. Each time you open Start from the toolbar, choose the destination again. A commit staged from Git History can supply the destination instead. The session supplies its device, project and working folder when available; check the destination before starting. Remote destinations are unsupported: they may start a chat but cannot be relied on to deliver the tool call or terminal events to this runner. Local Git and composer actions require a destination on this device. The selected session is not sent messages. If no valid local session is available, create one on this device first. The runner validates the destination and team before claiming the journal, and snapshots both for the run; later edits, team switches or session changes do not change it. The destination is stored in the run journal, including for interrupted runs. Acceptance starts asynchronous journal setup, not a guarantee that a chat was sent. The status and reason show progress or failure. Run details shows the saved route from the run snapshot, not the team currently displayed.
 
-The runner follows Chief's output and starts one chat per role block per run on the selected device and project, using that block's runtime and model when set. The first prompt starts with the block and team names to distinguish chat titles. Repeat visits reuse that block's chat and its context, including retries; separate blocks and separate runs have separate chats. It sends the task, role instructions and previous reports as task text. Each role is asked to call the Zeron `submit_report` tool once with its exact step reference (`nonce`) and a short human-readable `report`, then respond naturally. A role with Pass and Fail outputs also supplies `result` as `pass` or `fail`; an Always role omits it. If the role cannot complete its work, its report starts with the exact line `Status: blocked`; a review finding that work needs another pass is instead `result: fail`. Reports must be nonempty and at most 8192 bytes. The tool is exposed to Pi as `zeron_orchestrator_builder__submit_report`; names in other harnesses may differ. The final chat reply is not used for routing.
+To use an unsent message as the task, write it in an existing chat on this device and click **Run team** beside the composer. Drafts with attachment chips (including files, images, chat references and review comments) are rejected. Only the draft text is copied; quotes, other composer context and chat history are not forwarded. Builder neither sends nor clears the original draft.
+
+In **Start run**, choose a **Saved team**, review or edit the copied task, and provide a change source if needed. Builder snapshots the saved graph when you select it; later saves and unsaved Builder edits are not included. Choose **Start** from the original chat to launch without opening Builder. The original destination is named in the dialog and rechecked at Start. If the location changed, choose **Discard copy** and use **Run team** again in the intended chat. **Review copy** from another local chat lets you review or discard the copy, but not start it. Your graph, regular Start form, and original composer draft remain unchanged.
+
+The copy and your edits stay in window memory, not durable storage. Don’t rely on them surviving a window or plugin restart. Closing the dialog keeps the copy; **Discard copy** clears it. After Start is accepted, the copy stays available for review even if journal setup fails. You cannot start that copy again. Check **Run details** before trying another run, especially if delivery is unknown. Staging does not start a run or schedule any sends or retries. Open Builder to track progress or answer an Ask block.
+
+The runner follows Chief's output and starts one chat per role block per run on the selected device and project, using that block's runtime and model when set. It passes the captured working folder to Zeron, including a session’s worktree. A known worktree without a visible path is unavailable rather than falling back to the project root. Zeron still applies its normal scratch-folder rules for projectless chats. The first prompt starts with the block and team names to distinguish chat titles. Repeat visits reuse that block's chat and its context, including retries; separate blocks and separate runs have separate chats. It sends the task, role instructions and previous reports as task text. Each role is asked to call the Zeron `submit_report` tool once with its exact step reference (`nonce`) and a short human-readable `report`, then respond naturally. A role with Pass and Fail outputs also supplies `result` as `pass` or `fail`; an Always role omits it. If the role cannot complete its work, its report starts with the exact line `Status: blocked`; a review finding that work needs another pass is instead `result: fail`. Reports must be nonempty and at most 8192 bytes. The tool is exposed to Pi as `zeron_orchestrator_builder__submit_report`; names in other harnesses may differ. The final chat reply is not used for routing.
 
 The tool records the report in SQLite before acknowledging it. A report received before a dispatch receipt remains pending under its caller's actual chat ID and is used only if that ID matches the receipt and its step nonce. The journal snapshots role chats, visits, dispatches and receipts, including message IDs and delivery when provided. Events arriving during dispatch are buffered until the receipt is saved. The runner advances only after its own turn starts and finishes successfully and the matching report and receipt are saved. Identical repeated submissions are accepted; conflicting submissions block. A completed turn without a matching report blocks rather than guessing or resending. Only the parent team’s Finish ends a composed run. Open chat opens the latest available run chat; it may belong to an earlier block, not the displayed route. The runner does not link the existing active chat or inherit its model.
 
@@ -71,7 +82,35 @@ Use one Always output, or a Pass and a Fail output for a role. A Fail connection
 
 Stop prevents further dispatch but cannot cancel an in-flight turn or queued message. A stop, agent error or request for input, missing or invalid report, exhausted retry, ambiguous delivery, timeout, journal error or unexpected terminal event can block the run. A turn may still be running when the outcome is unknown. Some journal operations and listener registration have a 10-minute deadline; active agent turns do not. The runner does not resume automatically after interruption.
 
-For a blocked or interrupted run, use Open chat when available to inspect the latest known chat, then Review / abandon. The chat can belong to an earlier block or be unavailable. Abandoning does not cancel in-flight or queued messages: inspect the chats and ensure any in-flight agent and queued messages are stopped or otherwise resolved before confirming. Confirmation requests an asynchronous journal update; watch the status and reason for the result. It does not retry or restart the run. Abandonment is refused while a journal claim, chat dispatch, receipt or report journal update is pending, and may be unavailable or fail if journal ownership is uncertain. In those cases the journal may remain locked and need manual review. An unknown delivery can remain unknown even after pending operations settle; check the chats before deciding whether to abandon.
+## Ask for a decision
+
+**Ask** is optional. Teams without an Ask block run without a human decision gate. To add one, place **Ask** in the root team, enter a fixed question in its settings, and connect one **Always** output. Ask does not start or message a chat. The runner displays the question from the run snapshot, even if the canvas has changed.
+
+To try it, choose **New team → Research & approve**. Read the Researcher's proposal before choosing **Continue** to start the Worker or **Stop** to end the run without starting it. If the proposal needs changes, stop and start a new run with a revised task. Ask gates the route, not agent permissions: the Researcher is asked to work read-only and avoid external services, but it runs before Ask and can still take actions its harness permits.
+
+In any team, choose **Continue** to take the output or **Stop** to end the run without taking it. The decision must be saved to the journal before the runner proceeds or releases the lock. Neither action is available while the Ask checkpoint or decision is saving. If a save times out, the run blocks; the timeout does not cancel the write. Check **Run details** before taking further action. Chat replies and agent reports cannot answer Ask. If the window restarts, inspect the saved question and decision in **Run details**; the interrupted run cannot be resumed.
+
+## Run details
+
+Open **Run details** from the run controls or **Review run**. **Current run** reads the last saved checkpoint for the run known to this window and labels the window’s runner status separately. If there is no current run to show, **Saved checkpoint** prefers the locked journal entry, otherwise the newest entry by creation order. Use **Refresh** to reread the selected view. This is read-only inspection of Builder’s local runs, not a live trace or an engine crew board.
+
+**Run history** lists saved runs newest first, six per page, with the saved team name, status and whether the run was locked when read. Use **Older**, **Newer** or **Newest** to browse, and **View run** to open a saved checkpoint. Selecting a historical run does not change which run Builder can abandon.
+
+The checkpoint shows the saved team name, run ID, journal status, lock, phase, reason, route and destination when recorded. **Ask decisions** shows saved questions and their decisions when present; it does not answer them.
+
+Use **Run frame** to switch between the root team and saved child frames from saved-team blocks or **For each**. For more than six frames, use **Previous frames** and **Next frames**. A newly opened run starts on its saved checkpoint frame when identified, otherwise the root frame. The selected frame shows its saved block and, for child frames, the parent block, phase and item when recorded and recognized. Switching frames changes the role chats and visits shown, not the saved route.
+
+**Role chats** lists only the selected frame’s recorded role-to-chat links, in saved team order. Use **Previous chats** and **Next chats** when there are more than six. **Open chat** is available when Zeron still lists that session. The status beside each chat comes from Zeron’s session list and may be unknown or unavailable. It is advisory: it does not prove run progress, message delivery or that work has stopped.
+
+**Role visits** shows saved visits newest first within the selected frame, with receipts (including delivery and message ID when present), report previews, saved Pass/Fail decisions and chat links. The view flags invalid saved evidence where detected. A saved submission is not necessarily an accepted report. Reports are agent claims, not independent verification. A queued message may still execute; do not resend it based on the checkpoint.
+
+## Review a blocked run
+
+Inspect **Run details** and the run chats before choosing **Abandon run** in **Review run**. The main **Open chat** control may point to an earlier block or be unavailable. If another Zeron window still owns the run, stop the runner there first. Stop or resolve any in-flight turns and queued messages before confirming. Builder cannot verify that work has stopped.
+
+Builder validates the active checkpoint on recovery and rereads it before abandoning. It checks that the saved phase, role visits, chats, receipts and reports agree where required. It refuses abandonment while a dispatch or journal write is pending, when the write or dispatch outcome is unknown, or when it cannot validate the active entry. It only marks the run abandoned if the validated checkpoint still matches at the time of the update. Watch the status and reason for the result: successful abandonment releases the journal lock but does not cancel work, resend messages or restart the run.
+
+If dispatch remains unresolved after pending operations settle, inspect the destination’s session list and the journal manually. Do not resend. Builder will not abandon that run through the UI: its active slot stays locked, blocking new runs.
 
 ## Development
 
@@ -79,7 +118,7 @@ Create a development plugin folder with `zeron plugin new`, copy the source file
 
 ## Limitations
 
-The canvas describes the current editable team, not live block status or evidence that a workflow has run. Agent questions, automatic recovery and Chief inheritance are not implemented. Review roles run as agents; human review is for blocked, interrupted or unknown runs, not normal review steps. Manual abandonment does not stop agents, cancel queued messages or resolve unknown delivery. Prior reports are passed as untrusted context.
+The canvas describes the current editable team, not live block status or evidence that a workflow has run. Questions from agents, automatic recovery and Chief inheritance are not implemented. Review roles run as agents; use Ask where the workflow needs an explicit human decision. Manual abandonment does not stop agents, cancel queued messages or resolve unknown delivery. Prior reports are passed as untrusted context.
 
 Zeron 0.3.7 may omit Pi's terminal reply; this handoff does not depend on it and requires no host patch, shell or native helper. The plugin remains subject to Zeron's loop guard. Keep Zeron open and the plugin running on this device for the entire run: without a service, tool calls and turn events are handled by the window. Closing or restarting it interrupts the run; it is not resumed or resent automatically. Remote runs are unsupported. Agent tool availability and behavior depend on the selected harness and model.
 
